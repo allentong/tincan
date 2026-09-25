@@ -947,7 +947,7 @@ fn cmd_driver_nudges_once_per_new_message() {
         t.out(&["--as", "a", "send", "b", "1"])["wake"],
         json!({"b": "nudged"})
     );
-    // recipient hasn't read yet; a Stop hook or earlier nudge already told it about seq<=1
+    // recipient hasn't read yet, but message 2 is new, so it gets its own nudge
     assert_eq!(
         t.out(&["--as", "a", "send", "b", "2"])["wake"],
         json!({"b": "nudged"})
@@ -1486,4 +1486,31 @@ fn install_skills_puts_the_skill_where_harnesses_look() {
     let (_, o) = exec(None, &["install-skills"], opts);
     assert_eq!(o["skipped"][0]["for"], "claude", "{o}");
     assert!(!d.0.join(".claude/skills/tincan").exists());
+}
+
+#[test]
+fn message_ids_are_uuid_v7() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    let id = t.out(&["--as", "a", "send", "b", "hi"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // 8-4-4-4-12 hex, version nibble 7
+    let parts: Vec<&str> = id.split('-').collect();
+    assert_eq!(
+        parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+        [8, 4, 4, 4, 12],
+        "{id}"
+    );
+    assert!(
+        id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+        "{id}"
+    );
+    assert!(parts[2].starts_with('7'), "{id}");
+    assert_eq!(
+        t.out(&["--as", "b", "inbox"])["messages"][0]["id"],
+        id.as_str()
+    );
 }

@@ -7,7 +7,7 @@
 //!   with `--linger S`, first wait up to S seconds for replies to its own open requests.
 //! - SessionEnd: release the role.
 
-use crate::commands::{mark_told, unread_count, unregister};
+use crate::commands::{mark_told, unread_count, unregister, untold};
 use crate::error::{Code, Result, TincanError};
 use crate::harness;
 use crate::identity::{LazyCaller, Peer, me};
@@ -39,8 +39,11 @@ pub fn run(team: Option<&str>, as_role: Option<&str>, event: &str, linger: f64) 
     match event.as_str() {
         "Stop" | "SubagentStop" => stop(&conn, &me, linger).ok()?,
         "PostToolUse" => {
-            let newest = newest_untold(&conn, &me).ok()??;
-            mark_told(&conn, &me.role, newest).ok()?;
+            let new = untold(&conn, &me.role, true).ok()?;
+            if new.is_empty() {
+                return None;
+            }
+            mark_told(&conn, &me.role, &new).ok()?;
             context(&conn, &me, &event)
         }
         _ => context(&conn, &me, &event),
@@ -88,22 +91,6 @@ fn context(conn: &Connection, me: &Peer, event: &str) -> Option<Value> {
     })
 }
 
-/// Seq of the newest pending message this peer hasn't been told about, if any.
-fn newest_untold(conn: &Connection, me: &Peer) -> Result<Option<i64>> {
-    let told: i64 = conn.query_row(
-        "SELECT told_seq FROM peers WHERE role = ?1",
-        [&me.role],
-        |r| r.get(0),
-    )?;
-    let newest: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(m.seq), 0) FROM deliveries d JOIN messages m ON m.id = d.message_id
-         WHERE d.recipient = ?1 AND (d.lease_until IS NULL OR d.lease_until < ?2)",
-        params![me.role, now()],
-        |r| r.get(0),
-    )?;
-    Ok((newest > told).then_some(newest))
-}
-
 /// Does this peer have a request out that nobody has answered yet?
 fn awaiting_reply(conn: &Connection, me: &Peer, since: f64) -> Result<bool> {
     Ok(conn.query_row(
@@ -117,8 +104,9 @@ fn awaiting_reply(conn: &Connection, me: &Peer, since: f64) -> Result<bool> {
 fn stop(conn: &Connection, me: &Peer, linger: f64) -> Result<Option<Value>> {
     let deadline = now() + linger;
     loop {
-        if let Some(newest) = newest_untold(conn, me)? {
-            mark_told(conn, &me.role, newest)?;
+        let new = untold(conn, &me.role, true)?;
+        if !new.is_empty() {
+            mark_told(conn, &me.role, &new)?;
             let n = unread_count(conn, &me.role, false)?;
             return Ok(Some(json!({"decision": "block", "reason": format!(
                 "[tincan] {n} unread message(s) for role {}. Run `tincan inbox` and handle them before stopping. \

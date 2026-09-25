@@ -6,7 +6,6 @@ use crate::store::{connect, now, resolve_team};
 use crate::{Cli, Cmd, harness, hooks, wake};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use serde_json::{Value, json};
-use std::hash::{BuildHasher, Hasher};
 use std::io::{Read, Write};
 
 pub const MAX_BODY: usize = 8 * 1024;
@@ -262,11 +261,9 @@ struct SendOpts {
     no_reply: bool,
 }
 
-fn new_message_id(t: f64) -> String {
-    let rand = std::collections::hash_map::RandomState::new()
-        .build_hasher()
-        .finish();
-    format!("m_{:013}_{:08x}", (t * 1000.0) as u64, rand as u32)
+/// UUIDv7: globally unique and time-ordered, so ids sort roughly by send time.
+fn new_message_id() -> String {
+    uuid::Uuid::now_v7().to_string()
 }
 
 fn send(
@@ -400,7 +397,7 @@ fn send(
     };
 
     let t = now();
-    let id = new_message_id(t);
+    let id = new_message_id();
     tx.execute(
         "INSERT INTO messages(id, sender, client_id, kind, body, reply_to, hop, no_reply, created_at, recipients)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -435,16 +432,16 @@ fn wake_peers(conn: &Connection, peers: impl Iterator<Item = Peer>) -> Result<Va
             report.insert(p.role, "bad_spec".into());
             continue;
         };
-        let (newest, unread): (i64, i64) = conn.query_row(
-            "SELECT COALESCE(MAX(m.seq), 0), COUNT(*) FROM deliveries d JOIN messages m ON m.id = d.message_id
-             WHERE d.recipient = ?1",
-            [&p.role],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        if newest <= p.told_seq {
+        let new = untold(conn, &p.role, false)?;
+        if new.is_empty() {
             report.insert(p.role, "already_told".into());
             continue;
         }
+        let unread: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM deliveries WHERE recipient = ?1",
+            [&p.role],
+            |r| r.get(0),
+        )?;
         let busy_text = harness::find(&p.harness).and_then(|h| h.busy_text);
         if let (Some(busy), Some(screen)) = (busy_text, driver.screen())
             && screen.contains(&busy)
@@ -460,7 +457,7 @@ fn wake_peers(conn: &Connection, peers: impl Iterator<Item = Peer>) -> Result<Va
         ];
         let outcome = match driver.nudge(&text, &env) {
             Ok(()) => {
-                mark_told(conn, &p.role, newest)?;
+                mark_told(conn, &p.role, &new)?;
                 "nudged".to_string()
             }
             Err(e) => format!("failed: {e}"),
@@ -477,11 +474,26 @@ pub fn nudge_text(role: &str, unread: i64) -> String {
     )
 }
 
-pub fn mark_told(conn: &Connection, role: &str, seq: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE peers SET told_seq = MAX(told_seq, ?1) WHERE role = ?2",
-        params![seq, role],
+/// Ids of pending messages this peer hasn't been told about yet. `readable` skips ones leased
+/// by an inbox call in flight (a hook shouldn't point at mail that's being read right now).
+pub fn untold(conn: &Connection, role: &str, readable: bool) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT message_id FROM deliveries WHERE recipient = ?1 AND told = 0
+           AND (?3 = 0 OR lease_until IS NULL OR lease_until < ?2)",
     )?;
+    let ids = stmt
+        .query_map(params![role, now(), readable], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(ids)
+}
+
+/// Mark exactly these deliveries as told, so mail that lands meanwhile still gets its own nudge.
+pub fn mark_told(conn: &Connection, role: &str, ids: &[String]) -> Result<()> {
+    let mut stmt =
+        conn.prepare("UPDATE deliveries SET told = 1 WHERE recipient = ?1 AND message_id = ?2")?;
+    for id in ids {
+        stmt.execute(params![role, id])?;
+    }
     Ok(())
 }
 
@@ -510,7 +522,7 @@ fn inbox(
             "SELECT m.id, m.sender, m.kind, m.body, m.reply_to, m.hop, m.no_reply
              FROM deliveries d JOIN messages m ON m.id = d.message_id
              WHERE d.recipient = ?1 AND (d.lease_until IS NULL OR d.lease_until < ?2)
-             ORDER BY m.seq",
+             ORDER BY m.created_at, m.id",
         )?;
         stmt.query_map(params![me.role, t], |r| {
             Ok(json!({"id": r.get::<_, String>(0)?, "from": r.get::<_, String>(1)?, "kind": r.get::<_, String>(2)?,

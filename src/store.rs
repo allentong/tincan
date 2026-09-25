@@ -9,17 +9,20 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS peers(
   role TEXT PRIMARY KEY, harness TEXT NOT NULL, session_key TEXT, pid INTEGER,
   registered_at REAL NOT NULL, last_seen REAL NOT NULL, status TEXT NOT NULL DEFAULT 'active',
-  wake TEXT, told_seq INTEGER NOT NULL DEFAULT 0);
+  wake TEXT);
 CREATE TABLE IF NOT EXISTS messages(
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+  id TEXT PRIMARY KEY,
   sender TEXT NOT NULL, client_id TEXT, kind TEXT NOT NULL, body TEXT NOT NULL,
   reply_to TEXT, hop INTEGER NOT NULL DEFAULT 0, no_reply INTEGER NOT NULL DEFAULT 0,
   created_at REAL NOT NULL, recipients TEXT NOT NULL DEFAULT '[]', UNIQUE(sender, client_id));
 CREATE TABLE IF NOT EXISTS deliveries(
   message_id TEXT NOT NULL, recipient TEXT NOT NULL,
   delivered_at REAL, lease_until REAL,
+  -- set once the recipient has been told about it (by a nudge or a hook), so it is told only once
+  told INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(message_id, recipient));
 CREATE INDEX IF NOT EXISTS ix_deliveries_recipient ON deliveries(recipient);
+CREATE INDEX IF NOT EXISTS ix_messages_created ON messages(created_at);
 ";
 
 pub fn now() -> f64 {
@@ -120,7 +123,7 @@ pub fn take_notes() -> Option<String> {
 }
 
 /// Bump when SCHEMA changes. The store only holds in-flight mail, so an old one is rebuilt, not migrated.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 pub fn connect(db: &Path) -> Result<Connection> {
     let mut conn = Connection::open(db)?;

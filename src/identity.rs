@@ -264,8 +264,6 @@ pub struct Peer {
     pub status: String,
     /// Wake driver spec (`tmux:%3`, `cmux:<surface>`, `cmd:<shell>`), None = hooks/wait only.
     pub wake: Option<String>,
-    /// Highest message seq this peer has already been told about (by a nudge or a Stop hook).
-    pub told_seq: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,7 +297,7 @@ impl Peer {
     }
 }
 
-pub const PEER_COLS: &str = "role, harness, session_key, pid, last_seen, status, wake, told_seq";
+pub const PEER_COLS: &str = "role, harness, session_key, pid, last_seen, status, wake";
 
 pub fn peer_from_row(r: &rusqlite::Row) -> rusqlite::Result<Peer> {
     Ok(Peer {
@@ -310,7 +308,6 @@ pub fn peer_from_row(r: &rusqlite::Row) -> rusqlite::Result<Peer> {
         last_seen: r.get(4)?,
         status: r.get(5)?,
         wake: r.get(6)?,
-        told_seq: r.get(7)?,
     })
 }
 
@@ -457,7 +454,7 @@ fn auto_register(
          VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'active', NULL)
          ON CONFLICT(role) DO UPDATE SET harness = excluded.harness, session_key = excluded.session_key,
            pid = excluded.pid, registered_at = excluded.registered_at, last_seen = excluded.last_seen,
-           status = 'active', wake = NULL, told_seq = 0",
+           status = 'active', wake = NULL",
         params![role, harness, c.session_key, c.owner_pid, t],
     )?;
     let peer = get_peer(&tx, &role)?;
