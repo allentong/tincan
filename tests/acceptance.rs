@@ -1116,24 +1116,14 @@ fn fake_terminal(t: &Team, log: &str) -> Vec<String> {
     vec![fake]
 }
 
+/// cmd's echo logs the args space-separated, keeping the quotes argv added around the text.
+/// (PowerShell would be closer, but its startup can exceed the 3 s helper timeout.)
 #[cfg(windows)]
-fn fake_terminal(t: &Team, log: &str) -> Vec<String> {
-    let script = t.write(
-        "fake-term.ps1",
-        &format!("Add-Content -LiteralPath '{log}' -Value ((($args | ForEach-Object {{ \"$_|\" }}) -join ''))\n"),
-    );
-    [
-        "powershell",
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .chain([script])
-    .collect()
+fn fake_terminal(_t: &Team, log: &str) -> Vec<String> {
+    ["cmd", "/D", "/C", ">>", log, "echo"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 #[test]
@@ -1170,13 +1160,20 @@ fn user_driver_runs_argv_template_without_shell() {
     );
     assert_eq!(o["wake"], json!({"b": "nudged"}));
     let text = std::fs::read_to_string(&log).unwrap();
-    let lines: Vec<&str> = text.lines().collect();
-    assert!(
-        lines[0].starts_with("type|w1:p9|[tincan] role b has 1 unread"),
-        "{}",
-        lines[0]
-    );
-    assert_eq!(lines[1], "key|w1:p9|enter|");
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    let (typed, key) = if cfg!(windows) {
+        (
+            "type w1:p9 \"[tincan] role b has 1 unread",
+            "key w1:p9 enter",
+        )
+    } else {
+        (
+            "type|w1:p9|[tincan] role b has 1 unread",
+            "key|w1:p9|enter|",
+        )
+    };
+    assert!(lines[0].starts_with(typed), "{}", lines[0]);
+    assert_eq!(lines[1], key);
 }
 
 #[test]
