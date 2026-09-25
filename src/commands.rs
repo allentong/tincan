@@ -801,18 +801,23 @@ fn wait_replies(
     let recipients: Vec<String> = serde_json::from_str(&recipients).unwrap_or_default();
     let deadline = now() + timeout;
     loop {
+        // Liveness before replies: a recipient that replies and exits in between then counts
+        // as replied, never as ended.
+        let mut alive = vec![];
+        for r in &recipients {
+            if identity::get_peer(conn, r)?.is_some_and(|p| p.state() == PeerState::Active) {
+                alive.push(r.clone());
+            }
+        }
         let replied: Vec<String> = conn
             .prepare("SELECT DISTINCT sender FROM messages WHERE reply_to = ?1")?
             .query_map([id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        let mut waiting = vec![];
-        let mut ended = vec![];
-        for r in recipients.iter().filter(|r| !replied.contains(r)) {
-            match identity::get_peer(conn, r)?.map(|p| p.state()) {
-                Some(PeerState::Active) => waiting.push(r.clone()),
-                _ => ended.push(r.clone()),
-            }
-        }
+        let (waiting, ended): (Vec<String>, Vec<String>) = recipients
+            .iter()
+            .filter(|r| !replied.contains(r))
+            .cloned()
+            .partition(|r| alive.contains(r));
         if waiting.is_empty() || now() >= deadline {
             touch(conn, &me.role)?;
             return Ok(Some(
