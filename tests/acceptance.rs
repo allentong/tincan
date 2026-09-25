@@ -440,6 +440,17 @@ fn large_payload_rejected() {
 }
 
 #[test]
+fn send_to_self_rejected_with_sender_hint() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    let ask = id(&t.out(&["--as", "a", "send", "b", "6*7?"]));
+    let (rc, o) = t.run(&["--as", "b", "send", "b", "42", "--reply-to", &ask]);
+    assert_eq!((rc, o["error"].as_str()), (2, Some("usage")), "{o}");
+    assert!(o["message"].as_str().unwrap().contains("send to a"), "{o}");
+}
+
+#[test]
 fn reply_loop_capped() {
     let mut t = Team::new();
     t.reg("a", "claude");

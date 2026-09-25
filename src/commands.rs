@@ -277,6 +277,26 @@ fn send(
         }
     }
 
+    if o.to == me.role {
+        // Weaker models answer a message by addressing their own role; point them at the sender.
+        let hint = match &o.reply_to {
+            Some(parent_id) => tx
+                .query_row(
+                    "SELECT sender FROM messages WHERE id = ?1",
+                    [parent_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|s| format!("; to answer {parent_id}, send to {s}"))
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+        return Err(TincanError::new(
+            Code::Usage,
+            format!("can't send to yourself ({}){hint}", me.role),
+        ));
+    }
+
     let mut hop = 0;
     if let Some(parent_id) = &o.reply_to {
         let parent: Option<(i64, bool)> = tx
