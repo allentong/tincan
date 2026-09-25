@@ -36,7 +36,10 @@ pub fn builtins() -> Vec<Profile> {
             marker_env: strs(&["CLAUDECODE"]),
             busy_text: Some("esc to interrupt".into()),
             hooks_file: Some(".claude/settings.local.json".into()),
-            // A launched Claude can be handed work, so it may edit files and use the shell.
+            // A launched Claude is driven by another agent's messages, not by the user, so it gets
+            // edits plus a fixed list of local commands: tincan, read-only and local git, build and
+            // test. Nothing that reaches the network or leaves the repo (no git push, curl, rm -rf);
+            // anything else is denied. Widen it per machine with `launch` in harnesses.json.
             launch: Some(strs(&[
                 "claude",
                 "-p",
@@ -44,7 +47,22 @@ pub fn builtins() -> Vec<Profile> {
                 "--permission-mode",
                 "acceptEdits",
                 "--allowedTools",
-                "Bash",
+                "Bash(tincan:*)",
+                "Bash(git status:*)",
+                "Bash(git diff:*)",
+                "Bash(git log:*)",
+                "Bash(git show:*)",
+                "Bash(git add:*)",
+                "Bash(git commit:*)",
+                "Bash(cargo build:*)",
+                "Bash(cargo check:*)",
+                "Bash(cargo test:*)",
+                "Bash(cargo clippy:*)",
+                "Bash(cargo fmt:*)",
+                "Bash(npm test:*)",
+                "Bash(pnpm test:*)",
+                "Bash(pytest:*)",
+                "Bash(go test:*)",
             ])),
         },
         Profile {
