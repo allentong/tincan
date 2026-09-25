@@ -417,8 +417,10 @@ fn auto_register(
         return Ok(None);
     }
     let c = caller.get();
-    // A plain shell or script isn't a session: it must register explicitly.
-    if c.owner_pid.is_none() && c.session_key.is_none() {
+    // Only an agent session auto-registers, and every harness puts its session id in the
+    // session's env. A harness process alone isn't enough: a desktop app's run button or a
+    // terminal runs under the app's process too, and must register explicitly.
+    if c.session_key.is_none() {
         return Ok(None);
     }
     let harness = c.harness.as_ref().map_or("agent", |h| h.name.as_str());
