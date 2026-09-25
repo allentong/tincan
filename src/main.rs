@@ -106,6 +106,8 @@ pub enum Cmd {
         #[arg(long)]
         harness: String,
     },
+    /// Install the tincan skill for Claude Code, Codex and Grok (the installers run this)
+    InstallSkills,
 }
 
 fn main() {
