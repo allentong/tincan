@@ -334,7 +334,7 @@ fn ac4_concurrent_sends_consistent() {
     t.reg("grok", "grok");
     const N: usize = 60;
     const WORKERS: usize = 16;
-    let codes: Vec<i32> = thread::scope(|s| {
+    let results: Vec<(i32, Value)> = thread::scope(|s| {
         let t = &t;
         let handles: Vec<_> = (0..WORKERS)
             .map(|w| {
@@ -349,7 +349,7 @@ fn ac4_concurrent_sends_consistent() {
                             };
                             let body = format!("{a}-{i}");
                             let cid = format!("c{i}");
-                            t.run(&["--as", a, "send", b, &body, "--client-id", &cid]).0
+                            t.run(&["--as", a, "send", b, &body, "--client-id", &cid])
                         })
                         .collect::<Vec<_>>()
                 })
@@ -360,7 +360,8 @@ fn ac4_concurrent_sends_consistent() {
             .flat_map(|h| h.join().unwrap())
             .collect()
     });
-    assert_eq!(codes, vec![0; N]);
+    let failed: Vec<_> = results.iter().filter(|(rc, _)| *rc != 0).collect();
+    assert!(failed.is_empty(), "{} of {N} sends failed: {failed:?}", failed.len());
     // pending mail survives the senders exiting; each side gets exactly its half, no dupes
     t.kill_all();
     let g = t.out(&["--as", "grok", "inbox"]);
