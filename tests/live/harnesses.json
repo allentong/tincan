@@ -1,0 +1,88 @@
+[
+  {
+    "name": "claude",
+    "bin": "claude",
+    "cmd": [
+      "claude",
+      "-p",
+      "--allowedTools",
+      "Bash(tincan:*)"
+    ],
+    "stdin": "prompt",
+    "check": [
+      "claude",
+      "--version"
+    ]
+  },
+  {
+    "name": "claude-haiku",
+    "profile": "claude",
+    "bin": "claude",
+    "cmd": [
+      "claude",
+      "-p",
+      "--model",
+      "claude-haiku-4-5-20251001",
+      "--allowedTools",
+      "Bash(tincan:*)"
+    ],
+    "stdin": "prompt",
+    "check": [
+      "claude",
+      "--version"
+    ]
+  },
+  {
+    "name": "codex",
+    "bin": "codex",
+    "cmd": [
+      "codex",
+      "exec",
+      "--skip-git-repo-check",
+      "-s",
+      "workspace-write",
+      "-C",
+      "{team}",
+      "{prompt}"
+    ],
+    "check": [
+      "codex",
+      "--version"
+    ]
+  },
+  {
+    "name": "grok",
+    "bin": "grok",
+    "cmd": [
+      "grok",
+      "-p",
+      "{prompt}"
+    ],
+    "check": [
+      "grok",
+      "--version"
+    ]
+  },
+  {
+    "name": "opencode-openrouter",
+    "profile": "opencode",
+    "bin": "opencode",
+    "requires_env": [
+      "OPENROUTER_API_KEY"
+    ],
+    "cmd": [
+      "opencode",
+      "run",
+      "--dir",
+      "{team}",
+      "-m",
+      "openrouter/{model}",
+      "{prompt}"
+    ],
+    "model": "anthropic/claude-sonnet-5",
+    "check": [
+      "opencode",
+      "--version"
+    ]
+  }
+]
