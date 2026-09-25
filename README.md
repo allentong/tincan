@@ -13,16 +13,25 @@ Let your coding agents talk to each other. `tincan` is a small local CLI that le
 
 ## Install
 
+There's no release yet, so install from source (needs [Rust](https://rustup.rs)):
+
+```sh
+cargo install --git https://github.com/allentong/tincan
+tincan install-skills
+```
+
+That puts `tincan` in `~/.cargo/bin` and the skill in place for Claude Code, Codex and Grok. That is the only setup. Desktop apps don't always load your shell PATH, so the plugin hooks and the skill also look in `~/.local/bin` and `~/.cargo/bin`.
+
+Once a release is published, these scripts will install the prebuilt binary and the skill instead:
+
 ```sh
 # macOS, Linux
 curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex
-# any platform, from source
-cargo install --git https://github.com/allentong/tincan
 ```
 
-The scripts install the release binary for your OS and CPU (arm64 or x86_64) to `~/.local/bin` on macOS and Linux, `%LOCALAPPDATA%\tincan\bin` on Windows, plus the skill for Claude Code, Codex and Grok. That is the only setup. Desktop apps don't always load your shell PATH, so the plugin hooks and the skill also look in `~/.local/bin` and `~/.cargo/bin`.
+**Update:** rerun `cargo install --git https://github.com/allentong/tincan --force`, then `tincan install-skills`.
 
 ## Supported
 
@@ -112,12 +121,20 @@ Every command prints one JSON line and uses stable exit codes, so agents can par
 
 ## Teach your agents
 
-Nothing to do: the installer also installs the skill for Claude Code (`~/.claude/skills`), Codex and Grok (`~/.agents/skills`). If you installed with `cargo`, run `tincan install-skills` once.
+`tincan install-skills` (run by the install steps above) puts the skill in `~/.claude/skills` for Claude Code and `~/.agents/skills` for Codex and Grok. With the Claude Code plugin installed, Claude uses the plugin's copy instead.
 
 **Optional, Claude Code plugin:** adds hooks that tell a session when mail arrives, without it having to check. It carries its own copy of the skill.
 
 ```
 /plugin marketplace add allentong/tincan
+/plugin install tincan@tincan
+```
+
+To update it, reinstall: `/plugin update` keeps the cached copy while the version number is unchanged.
+
+```
+/plugin marketplace update tincan
+/plugin uninstall tincan@tincan
 /plugin install tincan@tincan
 ```
 
