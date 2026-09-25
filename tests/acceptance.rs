@@ -1,8 +1,6 @@
 //! Black-box acceptance tests for the tincan CLI, mapped to spec AC numbers.
 
 use serde_json::{Value, json};
-use std::os::fd::{FromRawFd, OwnedFd};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -67,6 +65,21 @@ fn exec(team: Option<&Path>, args: &[&str], o: Opts) -> (i32, Value) {
         _ => Value::Null,
     };
     (out.status.code().unwrap_or(-1), json)
+}
+
+/// A process that just stays alive for ten minutes.
+#[cfg(unix)]
+fn sleeper() -> Command {
+    let mut c = Command::new("sleep");
+    c.arg("600");
+    c
+}
+
+#[cfg(windows)]
+fn sleeper() -> Command {
+    let mut c = Command::new("ping");
+    c.args(["-n", "600", "127.0.0.1"]).stdout(Stdio::null());
+    c
 }
 
 fn unique_dir(prefix: &str) -> PathBuf {
@@ -135,7 +148,7 @@ impl Team {
 
     /// Stand-in for a live harness process that a role's liveness binds to.
     fn owner(&mut self) -> u32 {
-        let p = Command::new("sleep").arg("600").spawn().unwrap();
+        let p = sleeper().spawn().unwrap();
         let pid = p.id();
         self.procs.push(p);
         pid
@@ -661,11 +674,9 @@ fn inbox_killed_before_output_redelivers() {
     t.reg("claude", "claude");
     t.reg("grok", "grok");
     t.run(&["--as", "claude", "send", "grok", "survives"]);
-    let mut fds = [0; 2];
-    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-    // reader gone: the write fails with EPIPE
-    unsafe { libc::close(fds[0]) };
-    let w = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    // reader gone: the write fails with a broken pipe
+    let (r, w) = std::io::pipe().unwrap();
+    drop(r);
     let mut cmd = clean_command();
     cmd.arg("--team-dir")
         .arg(&t.dir)
@@ -898,10 +909,17 @@ fn cmd_driver_nudges_once_per_new_message() {
     let mut t = Team::new();
     let log = t.path("wake.log");
     t.reg("a", "claude");
-    let spec = format!(
-        "cmd:echo \"$TINCAN_WAKE_ROLE $TINCAN_WAKE_UNREAD\" >> {}",
-        log.display()
-    );
+    let spec = if cfg!(windows) {
+        format!(
+            "cmd:echo %TINCAN_WAKE_ROLE% %TINCAN_WAKE_UNREAD%>> \"{}\"",
+            log.display()
+        )
+    } else {
+        format!(
+            "cmd:echo \"$TINCAN_WAKE_ROLE $TINCAN_WAKE_UNREAD\" >> \"{}\"",
+            log.display()
+        )
+    };
     let (rc, o) = reg_wake(&mut t, "b", &spec, &[]);
     assert_eq!(rc, 0, "{o}");
     assert_eq!(
@@ -915,7 +933,8 @@ fn cmd_driver_nudges_once_per_new_message() {
     );
     t.run(&["--as", "b", "inbox"]);
     let text = std::fs::read_to_string(&log).unwrap();
-    assert_eq!(text.split('\n').take(2).collect::<Vec<_>>(), ["b 1", "b 2"]);
+    let lines: Vec<&str> = text.lines().map(str::trim_end).take(2).collect();
+    assert_eq!(lines, ["b 1", "b 2"]);
 }
 
 #[test]
@@ -926,7 +945,7 @@ fn nudge_counts_as_told_for_stop_hook() {
     reg_wake(
         &mut t,
         "b",
-        &format!("cmd:echo x >> {}", log.display()),
+        &format!("cmd:echo x >> \"{}\"", log.display()),
         &[],
     );
     t.run(&["--as", "b", "hook", "--event", "Stop"]);
@@ -1084,19 +1103,54 @@ fn wait_replies_times_out_with_stragglers() {
 
 // ---- extensions: drivers and harnesses plug in as JSON; a broken one never breaks the core ----
 
-#[test]
-fn user_driver_runs_argv_template_without_shell() {
-    let mut t = Team::new();
-    let log = t.path("argv.log").display().to_string();
+/// argv prefix of a fake terminal CLI that logs each call's args as `a|b|c|`.
+#[cfg(unix)]
+fn fake_terminal(t: &Team, log: &str) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt;
     let fake = t.write(
         "fake-term",
         &format!("#!/bin/sh\nprintf '%s|' \"$@\" >> {log}; echo >> {log}\n"),
     );
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    vec![fake]
+}
+
+#[cfg(windows)]
+fn fake_terminal(t: &Team, log: &str) -> Vec<String> {
+    let script = t.write(
+        "fake-term.ps1",
+        &format!("Add-Content -LiteralPath '{log}' -Value ((($args | ForEach-Object {{ \"$_|\" }}) -join ''))\n"),
+    );
+    [
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .chain([script])
+    .collect()
+}
+
+#[test]
+fn user_driver_runs_argv_template_without_shell() {
+    let mut t = Team::new();
+    let log = t.path("argv.log").display().to_string();
+    let fake = fake_terminal(&t, &log);
+    let step = |args: &[&str]| -> Vec<String> {
+        fake.iter()
+            .map(String::as_str)
+            .chain(args.iter().copied())
+            .map(str::to_string)
+            .collect()
+    };
     let drivers = t.write(
         "drivers.json",
         &json!([{"name": "faketerm", "detect_env": "FAKETERM_PANE",
-                 "nudge": [[&fake, "type", "{target}", "{text}"], [&fake, "key", "{target}", "enter"]]}])
+                 "nudge": [step(&["type", "{target}", "{text}"]), step(&["key", "{target}", "enter"])]}])
         .to_string(),
     );
     t.reg("a", "claude");

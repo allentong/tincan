@@ -60,10 +60,7 @@ pub fn load() -> (Vec<Driver>, Vec<String>) {
         .collect();
     let path = std::env::var_os("TINCAN_DRIVERS")
         .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| std::path::Path::new(&h).join(".config/tincan/drivers.json"))
-        });
+        .or_else(|| crate::harness::config_file("drivers.json"));
     if let Some(path) = path
         && let Ok(text) = std::fs::read_to_string(&path)
     {
