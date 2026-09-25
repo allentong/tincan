@@ -22,7 +22,7 @@ irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex
 cargo install --git https://github.com/allentong/tincan
 ```
 
-The scripts install the release binary for your OS and CPU (arm64 or x86_64): `~/.local/bin` on macOS and Linux, `%LOCALAPPDATA%\tincan\bin` on Windows.
+The scripts install the release binary for your OS and CPU (arm64 or x86_64): `~/.local/bin` on macOS and Linux, `%LOCALAPPDATA%\tincan\bin` on Windows. Desktop apps don't always load your shell PATH, so the plugin hooks and the skill also look in `~/.local/bin` and `~/.cargo/bin`.
 
 ## Supported
 
@@ -44,6 +44,8 @@ Cloud-hosted agents (Grok Bot, cloud sandboxes, CI) aren't supported: the skill 
 
 **Direct pairs.** Claude Code ↔ Codex, Claude Code ↔ Grok and Codex ↔ Grok each sent a question and got the answer back, in both directions, with Codex running as an interactive TUI in cmux.
 
+**Zero-config.** In fresh git repos with no `init` or `register`: `claude -p` and `codex exec` each auto-joined (team created at the repo root, sessions named `claude` and `codex`), and Claude asked Codex a question and got the answer. The same worked from the Claude desktop app (Code tab) running in a git worktree: it joined the main checkout's team and got Codex's reply.
+
 **Terminal wake.** cmux (Codex TUI), tmux 3.7 (Grok TUI) and herdr were tested with real sessions: an idle pane gets the nudge, and a pane mid-turn is skipped (`busy`) rather than typed over. The `cmd:` driver is covered by the test suite.
 
 **Platforms.**
@@ -58,26 +60,29 @@ Live harness runs have only been done on macOS. On Windows, the Claude Code plug
 
 ## Quick start
 
+Install the CLI and the skill, then just ask an agent: "message codex and ask it to review src/auth.rs".
+
+There is no setup step. The first time a session uses tincan (or starts, if hooks are installed):
+
+- **Team:** `.tincan/` is created at the git repo root, git-ignored and owner-only. Every session in the repo, including its worktrees, shares it. Outside a repo, sessions share a per-user default team (`~/.local/share/tincan/default`; Windows `%LOCALAPPDATA%\tincan\default`).
+- **Name:** the session registers under its harness name, `claude`, `codex` or `grok`. A second live Claude session gets `claude-2`.
+- **Confirmation:** the command's output carries a `setup` field saying what was created and the name taken, and the skill tells the agent to relay it to you.
+
 ```sh
-cd my-project
-tincan init        # or let an agent do it: "set up tincan here"
-
-# in the Claude Code session
-tincan register lead
-# in the Codex session
-tincan register reviewer
-
-tincan --as lead send reviewer "Can you review the diff in src/auth.rs?"
-tincan --as reviewer inbox
-tincan --as reviewer send lead "Two issues, see notes.md" --reply-to <id>
+tincan peers                                  # joins the team; lists who's online
+tincan send codex "Can you review src/auth.rs?"
+tincan inbox                                  # in the Codex session
+tincan send claude "Two issues, see notes.md" --reply-to <id>
 ```
+
+Optional: `tincan register reviewer` for a custom name, `--as ROLE` / `TINCAN_ROLE` to act as one, `--team-dir` / `TINCAN_TEAM_DIR` or `tincan init` (current dir) to pick a different team. Plain shells and scripts aren't agent sessions, so they don't auto-register: use `register` or `--as`.
 
 Every command prints one JSON line and uses stable exit codes, so agents can parse the result. (`tincan hook` is the exception: it prints nothing when there's nothing to tell the agent.)
 
 | Exit | Meaning |
 | --- | --- |
 | 0 | ok |
-| 2 | usage error, or no team found |
+| 2 | usage error, or the team dir is unusable |
 | 3 | peer unavailable (its session ended) |
 | 4 | body over 8 KiB |
 | 5 | role held by another live session |

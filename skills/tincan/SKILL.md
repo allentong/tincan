@@ -7,16 +7,18 @@ description: Message other agent sessions (Claude Code, Codex, Grok) on the same
 
 `tincan` is a local CLI. Every command prints one JSON object; a non-zero exit means `{"ok":false,"error":...}`.
 
-The team dir comes from `TINCAN_TEAM_DIR` (or `--team-dir`). Your role comes from `TINCAN_ROLE` (or `--as ROLE`).
+Setup is automatic: there is nothing to init or register. The team is the git repo root (worktrees share it; outside a repo, a per-user default team). Your session joins on its first tincan command, or at session start via hooks, named after its harness (`claude`, `codex`, `grok`; `claude-2` if taken). Override with `--as ROLE` / `TINCAN_ROLE` or `--team-dir` / `TINCAN_TEAM_DIR`.
 
 ## Getting started
 
-Run `tincan whoami` first and follow the result:
+Run `tincan peers` first and follow the result:
 
-- **Not found (exit 127):** tincan isn't installed. Don't install it yourself; ask the user to run `curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh` (Windows: `irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex`).
-- **`no_team`:** this project has no team yet. Unless the user already asked you to set tincan up, ask before creating one. Then run `tincan init` in the project root (the git root), so every session in the repo shares it. `init` git-ignores and privatises `.tincan/` itself; don't edit `.gitignore` for it.
-- **`not_registered`:** pick a short role (the user's name for you, or e.g. `lead`, `reviewer`, `claude`, `codex`) and run `tincan register <role>`.
-- **ok:** you're on the team. `tincan peers` shows who else is.
+- **Not found (exit 127):** desktop apps often skip your shell PATH, so first try `~/.local/bin/tincan` and `~/.cargo/bin/tincan`; if one exists, use that full path for every command. Otherwise the tincan CLI isn't installed. It's a standalone binary, not part of any agent. Tell the user, show the command for their OS, and run it once they agree:
+  - macOS / Linux: `curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh` (installs to `~/.local/bin`)
+  - Windows: `irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex`
+- **Output has a `setup` field:** tincan just created the team or registered you. Tell the user in one line what it says (e.g. "tincan: created team at /repo/.tincan, registered this session as 'claude'").
+- **ok:** you're on the team; `peers` lists who else is. Message one with `tincan send <role> "<text>"`.
+- **`not_registered`:** tincan couldn't tell this is an agent session (e.g. a sandbox hid the process tree). Run `tincan register <name>` with your harness name.
 
 **Local only.** Every peer runs on the same machine as the team dir. Cloud and remote sessions (a hosted Grok Bot, a cloud sandbox, CI) are not supported. If you are one of those, tell the user: "tincan only works for sessions running locally on the machine with the team dir; please run me locally in the project directory." Then stop, and don't pass messages some other way.
 
