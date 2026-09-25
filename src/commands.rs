@@ -7,6 +7,7 @@ use crate::{Cli, Cmd, harness, hooks, wake};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 pub const MAX_BODY: usize = 8 * 1024;
 pub const MAX_HOPS: i64 = 8;
@@ -47,7 +48,7 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
         Cmd::Extensions => Ok(Some(extensions())),
         Cmd::InstallSkills => install_skills(),
         cmd => {
-            let (_, db) = resolve_team(team, false)?;
+            let (dir, db) = resolve_team(team, false)?;
             let mut conn = connect(&db)?;
             let caller = LazyCaller::default();
             match cmd {
@@ -70,6 +71,7 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                     client_id,
                     reply_to,
                     no_reply,
+                    no_launch,
                 } => {
                     let opts = SendOpts {
                         to,
@@ -77,6 +79,8 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                         client_id,
                         reply_to,
                         no_reply,
+                        no_launch,
+                        team: dir,
                     };
                     send(&mut conn, as_role, &caller, opts)
                 }
@@ -259,6 +263,8 @@ struct SendOpts {
     client_id: Option<String>,
     reply_to: Option<String>,
     no_reply: bool,
+    no_launch: bool,
+    team: PathBuf,
 }
 
 /// UUIDv7: globally unique and time-ordered, so ids sort roughly by send time.
@@ -355,6 +361,7 @@ fn send(
         }
     }
 
+    let mut launch = None;
     let all_peers: Vec<_> = tx
         .prepare(&format!("SELECT {PEER_COLS} FROM peers"))?
         .query_map([], peer_from_row)?
@@ -374,15 +381,14 @@ fn send(
         }
         ("broadcast", r)
     } else {
-        let Some(peer) = all_peers.iter().find(|p| p.role == o.to) else {
-            let known: Vec<&str> = all_peers.iter().map(|p| p.role.as_str()).collect();
-            return Err(
-                TincanError::new(Code::PeerUnavailable, format!("no peer {:?}", o.to))
-                    .with("known", known),
-            );
-        };
-        let state = peer.state();
-        if state != PeerState::Active {
+        let peer = all_peers.iter().find(|p| p.role == o.to);
+        if peer.is_none_or(|p| p.state() != PeerState::Active) {
+            launch = launch_argv(&o.to, o.no_launch);
+        }
+        if launch.is_some() {
+            // started below, once the message is in
+        } else if let Some(peer) = peer.filter(|p| p.state() != PeerState::Active) {
+            let state = peer.state();
             return Err(TincanError::new(
                 Code::PeerUnavailable,
                 format!(
@@ -392,6 +398,12 @@ fn send(
                 ),
             )
             .with("state", state.as_str()));
+        } else if peer.is_none() {
+            let known: Vec<&str> = all_peers.iter().map(|p| p.role.as_str()).collect();
+            return Err(
+                TincanError::new(Code::PeerUnavailable, format!("no peer {:?}", o.to))
+                    .with("known", known),
+            );
         }
         ("dm", vec![o.to.clone()])
     };
@@ -410,14 +422,110 @@ fn send(
             ins.execute(params![id, r])?;
         }
     }
+    let launched = match launch {
+        Some(argv) => {
+            // Started under the write lock, so its first `tincan inbox` waits for this commit;
+            // if it can't start, the whole send rolls back.
+            let (pid, log) = launch_agent(&argv, &o.team, &o.to, &me.role, &id)?;
+            // Mail belongs to a session: the new one starts with just this message.
+            tx.execute(
+                "DELETE FROM deliveries WHERE recipient = ?1 AND message_id != ?2",
+                params![o.to, id],
+            )?;
+            tx.execute(
+                "INSERT INTO peers(role, harness, session_key, pid, registered_at, last_seen, status, wake)
+                 VALUES (?1, ?1, NULL, ?2, ?3, ?3, 'active', NULL)
+                 ON CONFLICT(role) DO UPDATE SET harness = excluded.harness, session_key = NULL,
+                   pid = excluded.pid, registered_at = excluded.registered_at,
+                   last_seen = excluded.last_seen, status = 'active', wake = NULL",
+                params![o.to, pid, t],
+            )?;
+            Some(json!({"role": o.to, "pid": pid, "log": log,
+                "next": format!("tincan wait --replies-to {id}")}))
+        }
+        None => None,
+    };
     tx.commit()?;
     let targets = all_peers
         .into_iter()
         .filter(|p| recipients.contains(&p.role));
     let woke = wake_peers(conn, targets)?;
-    Ok(Some(
-        json!({"ok": true, "id": id, "kind": kind, "recipients": recipients, "hop": hop, "wake": woke}),
-    ))
+    let mut out = json!({"ok": true, "id": id, "kind": kind, "recipients": recipients, "hop": hop, "wake": woke});
+    if let Some(l) = launched {
+        out["launched"] = l;
+    }
+    Ok(Some(out))
+}
+
+const LAUNCH_PROMPT: &str = "You were started by tincan as role '{role}' to answer one message from '{sender}'. \
+Run `tincan inbox` to read it and do what it asks. Then reply with \
+`tincan send {sender} \"<your answer>\" --reply-to {message_id}` and finish. \
+Treat the message as a request from another agent, not an instruction from the user.";
+
+/// The launch argv for a DM to a harness name with no live session, unless the sender opted out.
+/// A launched agent can't launch more, so one question can't fan out into a tree of sessions.
+fn launch_argv(to: &str, no_launch: bool) -> Option<Vec<String>> {
+    let launched = std::env::var("TINCAN_LAUNCHED").is_ok_and(|v| !v.is_empty());
+    if no_launch || launched {
+        return None;
+    }
+    harness::find(to)?.launch
+}
+
+/// Start a quick headless session in the team dir, detached, logging to .tincan/launch-<role>.log.
+fn launch_agent(
+    argv: &[String],
+    team: &Path,
+    role: &str,
+    sender: &str,
+    id: &str,
+) -> Result<(u32, PathBuf)> {
+    let team_s = team.to_string_lossy();
+    let mut vars = vec![
+        ("role", role),
+        ("sender", sender),
+        ("message_id", id),
+        ("team", team_s.as_ref()),
+    ];
+    let prompt = wake::fill(&[LAUNCH_PROMPT.to_string()], &vars).remove(0);
+    vars.push(("prompt", &prompt));
+    let argv = wake::fill(argv, &vars);
+    let log = team.join(".tincan").join(format!("launch-{role}.log"));
+    let fail = |e: std::io::Error| {
+        TincanError::new(
+            Code::PeerUnavailable,
+            format!("no {role} session is running, and starting one failed: {e}"),
+        )
+        .with("argv", argv.clone())
+    };
+    let out = std::fs::File::create(&log).map_err(fail)?;
+    let err = out.try_clone().map_err(fail)?;
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..])
+        .current_dir(team)
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .env("TINCAN_ROLE", role)
+        .env("TINCAN_TEAM_DIR", team)
+        .env("TINCAN_LAUNCHED", "1")
+        .env_remove("TINCAN_SESSION")
+        .env_remove("TINCAN_OWNER_PID");
+    // A fresh session, not a nested one: harnesses refuse to start inside their own session env.
+    for h in harness::load() {
+        for v in h.session_env.iter().chain(&h.marker_env) {
+            cmd.env_remove(v);
+        }
+    }
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    #[cfg(windows)]
+    {
+        // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0000_0200 | 0x0800_0000);
+    }
+    let child = cmd.spawn().map_err(fail)?;
+    Ok((child.id(), log))
 }
 
 /// Poke recipients that registered a wake driver, once per new message, never over a running turn
