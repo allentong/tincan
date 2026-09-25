@@ -909,9 +909,10 @@ fn cmd_driver_nudges_once_per_new_message() {
     let mut t = Team::new();
     let log = t.path("wake.log");
     t.reg("a", "claude");
+    // Redirect first on Windows: `echo b 1>> f` parses `1>>` as a stdout redirect.
     let spec = if cfg!(windows) {
         format!(
-            "cmd:echo %TINCAN_WAKE_ROLE% %TINCAN_WAKE_UNREAD%>> \"{}\"",
+            "cmd:>> \"{}\" echo %TINCAN_WAKE_ROLE% %TINCAN_WAKE_UNREAD%",
             log.display()
         )
     } else {
