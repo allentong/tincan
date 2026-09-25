@@ -83,7 +83,16 @@ tincan wait --replies-to <id>                                   # returns once c
 tincan inbox
 ```
 
-The quick session reads the question with `tincan inbox` and replies with `--reply-to`. It's meant for questions: Claude's gets read-only tools plus `tincan`; Codex's runs in its `workspace-write` sandbox. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
+The quick session reads the question with `tincan inbox` and replies with `--reply-to`. It can do work, not just answer: Claude's may edit files (`acceptEdits`) and use the shell; Codex's runs in its `workspace-write` sandbox. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
+
+**Keeping it for follow-ups.** With `--stay`, the started session answers or does the task, can ask the sender questions (`tincan send <sender> "…"`), and waits for more. It ends when told it's done, or when the sender's session ends. Follow-ups go to it by name, with its context intact. `--new` starts a fresh session under the next free name (`claude-2`) even when one is running.
+
+```sh
+tincan send claude "Review the plan in docs/plan.md" --stay   # Claude answers, maybe asks back
+tincan inbox                                                  # its answer or question
+tincan send claude "Good. Now check the rollback section"     # same session, same context
+tincan send claude "You're done, thanks" --no-reply
+```
 
 Optional: `tincan register reviewer` for a custom name, `--as ROLE` / `TINCAN_ROLE` to act as one, `--team-dir` / `TINCAN_TEAM_DIR` or `tincan init` (current dir) to pick a different team. Plain shells and scripts aren't agent sessions, so they don't auto-register: use `register` or `--as`.
 

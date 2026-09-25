@@ -1676,3 +1676,45 @@ fn a_launch_that_cannot_start_sends_nothing() {
     );
     assert_eq!(roles(&t.out(&["peers", "--all"])), ["lead"]);
 }
+
+#[test]
+fn new_starts_a_fresh_session_next_to_a_running_one() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    t.reg("fake", "claude");
+    let h = fake_harness(&t, &[BIN, "whoami"]);
+    let env = [("TINCAN_HARNESSES", h.as_str()), ("TINCAN_LAUNCHED", "")];
+    // without --new, mail goes to the running session
+    let (_, o) = t.env(&["--as", "lead", "send", "fake", "x"], &env);
+    assert!(o["launched"].is_null(), "{o}");
+    let (rc, o) = t.env(&["--as", "lead", "send", "fake", "y", "--new"], &env);
+    assert_eq!(
+        (rc, o["launched"]["role"].as_str()),
+        (0, Some("fake-2")),
+        "{o}"
+    );
+    assert_eq!(strs(&o["recipients"]), ["fake-2"]);
+    // --new only makes sense for a harness name
+    let (rc, _) = t.env(&["--as", "lead", "send", "lead", "z", "--new"], &env);
+    assert_eq!(rc, 2);
+}
+
+#[test]
+fn staying_session_waits_until_its_lead_is_done() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    t.reg("helper", "codex");
+    let env = [("TINCAN_LEAD", "lead")];
+    // lead still around: a normal wait
+    let (_, o) = t.env(&["--as", "helper", "wait", "--timeout", "0.3"], &env);
+    assert_eq!(
+        (&o["timed_out"], &o["lead_gone"]),
+        (&json!(true), &Value::Null)
+    );
+    // lead's session ends: the helper's wait returns at once so it can finish
+    assert_eq!(t.run(&["--as", "lead", "unregister"]).0, 0);
+    let start = Instant::now();
+    let (_, o) = t.env(&["--as", "helper", "wait", "--timeout", "10"], &env);
+    assert_eq!(o["lead_gone"], "lead", "{o}");
+    assert!(start.elapsed() < Duration::from_secs(3));
+}

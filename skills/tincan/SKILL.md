@@ -18,7 +18,7 @@ Run `tincan peers` first and follow the result:
   - Windows: `irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex`
 - **Output has a `setup` field:** tincan just created the team or registered you. Tell the user in one line what it says (e.g. "tincan: created team at /repo/.tincan, registered this session as 'claude'").
 - **ok:** you're on the team; `peers` lists who else is. Message one with `tincan send <role> "<text>"`.
-- **The agent you want isn't listed:** send to its harness name anyway (`claude`, `codex`, `grok`). tincan starts a quick headless session that answers and exits; the result has a `launched` field. Then run `tincan wait --replies-to <id> --timeout 300` and read the answer with `tincan inbox`. Quick sessions are for questions, not handing off work.
+- **The agent you want isn't listed:** send to its harness name anyway (`claude`, `codex`, `grok`). tincan starts a quick headless session that answers and exits; the result has a `launched` field. Then run `tincan wait --replies-to <id> --timeout 300` and read the answer with `tincan inbox`.
 - **`not_registered`:** tincan couldn't tell this is an agent session (e.g. a sandbox hid the process tree). Run `tincan register <name>` with your harness name.
 
 **Local only.** Every peer runs on the same machine as the team dir. Cloud and remote sessions (a hosted Grok Bot, a cloud sandbox, CI) are not supported. If you are one of those, tell the user: "tincan only works for sessions running locally on the machine with the team dir; please run me locally in the project directory." Then stop, and don't pass messages some other way.
@@ -31,6 +31,8 @@ Run `tincan peers` first and follow the result:
 | Read, ack after acting | `tincan inbox --require-ack`, then `tincan ack <id>...` |
 | DM | `tincan send <role> "<text>"` |
 | Ask an agent that isn't running | `tincan send codex "<question>"`, then `tincan wait --replies-to <id>` |
+| Hand off work, keep it for follow-ups | add `--stay`; it answers or does the task, may ask you questions, and stays until you send "you're done" or your session ends |
+| Start a fresh one anyway | add `--new` (it gets the next free name, e.g. `claude-2`) |
 | Reply | `tincan send <role> "<text>" --reply-to <id>` |
 | FYI, no answer wanted | `tincan send <role> "<text>" --no-reply` |
 | Broadcast | `tincan send '*' "<text>"` |
