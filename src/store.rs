@@ -38,12 +38,20 @@ pub fn resolve_team(flag: Option<&str>, create: bool) -> Result<(PathBuf, PathBu
         Some(d) => {
             std::path::absolute(d).map_err(|e| TincanError::new(Code::NoTeam, e.to_string()))?
         }
-        None => find_upwards(&std::env::current_dir().unwrap_or_default()).ok_or_else(|| {
-            TincanError::new(
-                Code::NoTeam,
-                "no team dir: pass --team-dir, set TINCAN_TEAM_DIR, or run `init`",
-            )
-        })?,
+        None => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            match find_upwards(&cwd) {
+                Some(d) => d,
+                // `init` with no team found anywhere above starts one here.
+                None if create => cwd,
+                None => {
+                    return Err(TincanError::new(
+                        Code::NoTeam,
+                        "no team dir: pass --team-dir, set TINCAN_TEAM_DIR, or run `init`",
+                    ));
+                }
+            }
+        }
     };
     let tincan_dir = dir.join(".tincan");
     if !tincan_dir.is_dir() {

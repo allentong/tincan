@@ -11,11 +11,19 @@ Let your coding agents talk to each other. `tincan` is a small local CLI that le
 - **Loop guards.** Reply chains stop at 8 hops; `--no-reply` messages can't be answered.
 - **Pluggable.** New harnesses and terminals are JSON entries, not code changes.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh
+# or build from source
+cargo install --git https://github.com/allentong/tincan
+```
+
+The script installs the release binary for macOS or Linux (arm64, x86_64) into `~/.local/bin`.
+
 ## Quick start
 
 ```sh
-cargo install --path .          # prebuilt binaries coming soon
-
 cd my-project
 tincan init
 
@@ -45,12 +53,18 @@ Every command prints one JSON line and uses stable exit codes, so agents can par
 
 ## Teach your agents
 
-Copy `skill/SKILL.md` to where each harness looks for skills:
+**Claude Code:** install the plugin. It adds the skill plus hooks that tell the agent when mail arrives.
+
+```
+/plugin marketplace add allentong/tincan
+/plugin install tincan@tincan
+```
+
+**Codex and others:** copy the skill to where the harness looks for skills:
 
 ```sh
-mkdir -p .claude/skills/tincan .agents/skills/tincan
-cp skill/SKILL.md .claude/skills/tincan/    # Claude Code
-cp skill/SKILL.md .agents/skills/tincan/    # Codex
+mkdir -p ~/.agents/skills/tincan
+cp skills/tincan/SKILL.md ~/.agents/skills/tincan/    # Codex (or .agents/skills/ per project)
 ```
 
 ## Getting woken up
@@ -59,7 +73,7 @@ An agent sitting idle won't check its inbox on its own. Pick what fits each sess
 
 | How | Works with | Setup |
 | --- | --- | --- |
-| Hooks | Claude Code, Codex | `tincan hooks --harness claude` (or `codex`) prints the config and the file to merge it into. The Stop hook blocks once per new message; `--linger 120` keeps an agent alive for replies to its own questions. |
+| Hooks | Claude Code, Codex | Included in the Claude Code plugin. Otherwise `tincan hooks --harness claude` (or `codex`) prints the config and the file to merge it into. The Stop hook blocks once per new message; `--linger 120` keeps an agent alive for replies to its own questions. |
 | Background wait | Claude Code | Run `tincan wait --timeout 3600` as a background task. It exits when mail lands. |
 | Terminal nudge | Any TUI in tmux, cmux, herdr, … | `tincan register ROLE --wake auto`. Senders type a short nudge into the idle pane, never over a running turn. |
 | Anything else | Scripts, notifiers | `--wake cmd:'<shell>'` runs with `TINCAN_WAKE_ROLE`, `TINCAN_WAKE_UNREAD`, `TINCAN_WAKE_TEXT`. |
@@ -113,13 +127,14 @@ Message bodies come from other agents. The skill tells agents to treat them as a
 ```sh
 cargo build --release
 cargo clippy --all-targets -- -D warnings
-cargo test
-python3 tests/acceptance.py                 # black-box CLI tests
-python3 tests/live/run.py                   # real round trips with installed harnesses
-python3 tests/live/run.py --broadcast       # one question to every harness at once
+cargo test                                          # unit + black-box CLI tests
+cargo test --test live -- --ignored --nocapture     # real round trips with installed harnesses
+cargo test --test live broadcast -- --ignored --nocapture   # one question to every harness at once
 ```
 
-Live harnesses are listed in `tests/live/harnesses.json`. Entries whose binary or API key is missing are skipped.
+Live harnesses are listed in `tests/live/harnesses.json`. Entries whose binary or API key is missing are skipped; `TINCAN_LIVE=codex,claude` picks a subset.
+
+Releases: push a `v*` tag and the release workflow builds and uploads the binaries `install.sh` fetches.
 
 ## License
 

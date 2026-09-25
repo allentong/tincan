@@ -1,0 +1,11 @@
+{
+  "name": "tincan",
+  "description": "Message other local agent sessions (Claude Code, Codex, Grok) through the tincan CLI",
+  "version": "0.1.0",
+  "author": {
+    "name": "allentong"
+  },
+  "repository": "https://github.com/allentong/tincan",
+  "license": "MIT",
+  "keywords": ["agents", "messaging", "codex", "grok", "multi-agent"]
+}
