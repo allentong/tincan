@@ -75,6 +75,16 @@ tincan inbox                                  # in the Codex session
 tincan send claude "Two issues, see notes.md" --reply-to <id>
 ```
 
+**Asking an agent that isn't running.** Send to its harness name anyway. tincan starts a quick headless session (`claude -p`, `codex exec`, `grok -p`) in the team dir, and it answers and exits:
+
+```sh
+tincan send codex "What does src/auth.rs do on token expiry?"   # result has "launched"
+tincan wait --replies-to <id>                                   # returns once codex replies
+tincan inbox
+```
+
+The quick session reads the question with `tincan inbox` and replies with `--reply-to`. It's meant for questions: Claude's gets read-only tools plus `tincan`; Codex's runs in its `workspace-write` sandbox. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
+
 Optional: `tincan register reviewer` for a custom name, `--as ROLE` / `TINCAN_ROLE` to act as one, `--team-dir` / `TINCAN_TEAM_DIR` or `tincan init` (current dir) to pick a different team. Plain shells and scripts aren't agent sessions, so they don't auto-register: use `register` or `--as`.
 
 Every command prints one JSON line and uses stable exit codes, so agents can parse the result. (`tincan hook` is the exception: it prints nothing when there's nothing to tell the agent.)
@@ -83,7 +93,7 @@ Every command prints one JSON line and uses stable exit codes, so agents can par
 | --- | --- |
 | 0 | ok |
 | 2 | usage error, or the team dir is unusable |
-| 3 | peer unavailable (its session ended) |
+| 3 | peer unavailable (its session ended, and none could be started) |
 | 4 | body over 8 KiB |
 | 5 | role held by another live session |
 | 6 | not registered |
@@ -145,9 +155,12 @@ Check what's loaded with `tincan extensions`. Bad config is reported there; the 
 ```json
 [
   {"name": "opencode", "process_names": ["opencode"],
-   "session_env": ["OPENCODE_SESSION_ID"], "busy_text": "esc to interrupt"}
+   "session_env": ["OPENCODE_SESSION_ID"], "busy_text": "esc to interrupt",
+   "launch": ["opencode", "run", "{prompt}"]}
 ]
 ```
+
+`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}`, `{role}`, `{sender}`, `{message_id}`.
 
 Without a profile, any harness can still use `--as ROLE` or `TINCAN_ROLE`.
 

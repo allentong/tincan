@@ -141,7 +141,7 @@ struct Template {
     target: String,
 }
 
-fn fill(argv: &[String], vars: &[(&str, &str)]) -> Vec<String> {
+pub(crate) fn fill(argv: &[String], vars: &[(&str, &str)]) -> Vec<String> {
     argv.iter()
         .map(|a| {
             vars.iter()

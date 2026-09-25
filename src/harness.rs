@@ -18,6 +18,9 @@ pub struct Profile {
     pub busy_text: Option<String>,
     /// Settings file (relative to the project) for Claude-Code-style command hooks; None = no hooks.
     pub hooks_file: Option<String>,
+    /// argv that starts a quick headless session to answer mail sent to this harness's name
+    /// while none is running. Placeholders: {prompt} {team} {role} {sender} {message_id}.
+    pub launch: Option<Vec<String>>,
 }
 
 fn strs(v: &[&str]) -> Vec<String> {
@@ -33,6 +36,14 @@ pub fn builtins() -> Vec<Profile> {
             marker_env: strs(&["CLAUDECODE"]),
             busy_text: Some("esc to interrupt".into()),
             hooks_file: Some(".claude/settings.local.json".into()),
+            // Read-only tools need no approval; Bash is limited to tincan itself.
+            launch: Some(strs(&[
+                "claude",
+                "-p",
+                "{prompt}",
+                "--allowedTools",
+                "Bash(tincan:*)",
+            ])),
         },
         Profile {
             name: "codex".into(),
@@ -41,6 +52,17 @@ pub fn builtins() -> Vec<Profile> {
             marker_env: strs(&["CODEX_THREAD_ID", "CODEX_SANDBOX"]),
             busy_text: Some("esc to interrupt".into()),
             hooks_file: Some(".codex/hooks.json".into()),
+            // workspace-write: the team store lives in the repo, and tincan must write to it.
+            launch: Some(strs(&[
+                "codex",
+                "exec",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                "-C",
+                "{team}",
+                "{prompt}",
+            ])),
         },
         Profile {
             name: "grok".into(),
@@ -49,6 +71,7 @@ pub fn builtins() -> Vec<Profile> {
             marker_env: strs(&["GROK_SESSION_ID"]),
             busy_text: Some("[stop]".into()),
             hooks_file: Some(".grok/hooks/tincan.json".into()),
+            launch: Some(strs(&["grok", "-p", "{prompt}"])),
         },
     ]
 }
@@ -96,7 +119,8 @@ fn user_profiles() -> Vec<Profile> {
 }
 
 /// `{"name": "opencode", "process_names": ["opencode"], "session_env": [...], "marker_env": [...],
-///   "busy_text": "esc to interrupt", "hooks_file": null}` — only `name` is required.
+///   "busy_text": "esc to interrupt", "hooks_file": null, "launch": ["opencode", "run", "{prompt}"]}`
+/// — only `name` is required.
 fn parse(v: &Value) -> Option<Profile> {
     let list = |k: &str| -> Vec<String> {
         v.get(k)
@@ -125,6 +149,15 @@ fn parse(v: &Value) -> Option<Profile> {
             .get("hooks_file")
             .and_then(Value::as_str)
             .map(str::to_string),
+        launch: v
+            .get("launch")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|a| !a.is_empty()),
         name,
     })
 }

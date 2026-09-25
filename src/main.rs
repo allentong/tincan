@@ -56,7 +56,8 @@ pub enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// Send a DM (`<role>`) or broadcast (`'*'`); body `-` reads stdin
+    /// Send a DM (`<role>`) or broadcast (`'*'`); body `-` reads stdin. A DM to a harness name
+    /// (claude, codex, grok) with no session running starts a quick one to answer it
     Send {
         to: String,
         body: String,
@@ -68,6 +69,9 @@ pub enum Cmd {
         /// FYI only: replies to this message are rejected
         #[arg(long)]
         no_reply: bool,
+        /// Fail instead of starting a quick headless session when the recipient isn't running
+        #[arg(long)]
+        no_launch: bool,
     },
     /// Read unread messages
     Inbox {

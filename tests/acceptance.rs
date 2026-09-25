@@ -29,6 +29,9 @@ fn clean_command() -> Command {
     }
     // Not an agent session unless a test says so, so nothing auto-registers by accident.
     cmd.env("TINCAN_OWNER_PID", "0");
+    // Act like a launched session, which never launches, so mail to a missing `codex` can't
+    // start the real one. Launch tests clear it.
+    cmd.env("TINCAN_LAUNCHED", "1");
     // A throwaway home, so the per-user default team and config never touch the real one.
     let home = std::env::temp_dir().join(format!("tincan-home-{}", std::process::id()));
     cmd.env("HOME", &home)
@@ -783,6 +786,8 @@ fn hook(t: &Team, event: &str, linger: Option<u32>) -> Value {
         &args,
         Opts {
             stdin: Some(&payload),
+            // a regular session, not a launched one (see clean_command)
+            env: &[("TINCAN_LAUNCHED", "")],
             ..Opts::default()
         },
     )
@@ -823,6 +828,25 @@ fn stop_lingers_for_reply_to_open_request() {
     });
     assert_eq!(o["decision"], "block");
     assert!(elapsed < Duration::from_secs(5));
+}
+
+#[test]
+fn launched_session_stops_without_lingering() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    // b's answer is itself an unanswered DM, but a quick session ends right after answering
+    t.run(&["--as", "b", "send", "a", "answer"]);
+    let start = Instant::now();
+    let (rc, o) = t.with(
+        &["--as", "b", "hook", "--event", "Stop", "--linger", "10"],
+        Opts {
+            stdin: Some(r#"{"hook_event_name":"Stop"}"#),
+            ..Opts::default()
+        },
+    );
+    assert_eq!((rc, o), (0, Value::Null));
+    assert!(start.elapsed() < Duration::from_secs(3));
 }
 
 #[test]
@@ -1518,4 +1542,115 @@ fn message_ids_are_uuid_v7() {
         t.out(&["--as", "b", "inbox"])["messages"][0]["id"],
         id.as_str()
     );
+}
+
+/// A harness whose "agent" is tincan itself: it answers the question and exits.
+fn fake_harness(t: &Team, launch: &[&str]) -> String {
+    let path = t.dir.join("harnesses.json");
+    std::fs::write(
+        &path,
+        json!([{"name": "fake", "launch": launch}]).to_string(),
+    )
+    .unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn mail_to_a_missing_harness_starts_a_quick_session_that_answers() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let h = fake_harness(
+        &t,
+        &[
+            BIN,
+            "send",
+            "{sender}",
+            "pong from {role}",
+            "--reply-to",
+            "{message_id}",
+        ],
+    );
+    let env = [("TINCAN_HARNESSES", h.as_str()), ("TINCAN_LAUNCHED", "")];
+    let (rc, o) = t.env(&["--as", "lead", "send", "fake", "ping?"], &env);
+    assert_eq!(rc, 0, "{o}");
+    assert_eq!(o["launched"]["role"], "fake", "{o}");
+    let mid = id(&o);
+    let (_, w) = t.env(
+        &[
+            "--as",
+            "lead",
+            "wait",
+            "--replies-to",
+            &mid,
+            "--timeout",
+            "20",
+        ],
+        &env,
+    );
+    assert_eq!(strs(&w["replied"]), ["fake"], "{w}");
+    let inbox = t.out(&["--as", "lead", "inbox"]);
+    assert_eq!(bodies(&inbox), ["pong from fake"]);
+    assert_eq!(msgs(&inbox)[0]["reply_to"], mid.as_str());
+    // the quick session ends once it has answered, and the next question starts a new one
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while roles(&t.out(&["peers"])).contains(&"fake".to_string()) {
+        assert!(Instant::now() < deadline, "launched session never ended");
+        thread::sleep(Duration::from_millis(100));
+    }
+    let (rc, o) = t.env(&["--as", "lead", "send", "fake", "again?"], &env);
+    assert_eq!(
+        (rc, o["launched"]["role"].as_str()),
+        (0, Some("fake")),
+        "{o}"
+    );
+}
+
+#[test]
+fn launching_is_optional() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let h = fake_harness(&t, &[BIN, "whoami"]);
+    let env = [("TINCAN_HARNESSES", h.as_str()), ("TINCAN_LAUNCHED", "")];
+    let (rc, o) = t.env(&["--as", "lead", "send", "fake", "x", "--no-launch"], &env);
+    assert_eq!(
+        (rc, o["error"].as_str()),
+        (3, Some("peer_unavailable")),
+        "{o}"
+    );
+    // everywhere
+    let (rc, _) = t.env(
+        &["--as", "lead", "send", "fake", "x"],
+        &[("TINCAN_HARNESSES", &h)],
+    );
+    assert_eq!(rc, 3);
+    // and a launched session can't launch more
+    let env = [
+        ("TINCAN_HARNESSES", h.as_str()),
+        ("TINCAN_LAUNCHED", ""),
+        ("TINCAN_LAUNCHED", "1"),
+    ];
+    assert_eq!(t.env(&["--as", "lead", "send", "fake", "x"], &env).0, 3);
+    assert_eq!(roles(&t.out(&["peers"])), ["lead"]);
+}
+
+#[test]
+fn a_launch_that_cannot_start_sends_nothing() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let h = fake_harness(&t, &["tincan-no-such-agent-binary"]);
+    let env = [("TINCAN_HARNESSES", h.as_str()), ("TINCAN_LAUNCHED", "")];
+    let (rc, o) = t.env(&["--as", "lead", "send", "fake", "x"], &env);
+    assert_eq!(
+        (rc, o["error"].as_str()),
+        (3, Some("peer_unavailable")),
+        "{o}"
+    );
+    assert!(
+        o["message"]
+            .as_str()
+            .unwrap()
+            .contains("starting one failed"),
+        "{o}"
+    );
+    assert_eq!(roles(&t.out(&["peers", "--all"])), ["lead"]);
 }

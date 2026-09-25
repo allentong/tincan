@@ -37,7 +37,11 @@ pub fn run(team: Option<&str>, as_role: Option<&str>, event: &str, linger: f64) 
     }
     let me = me(&conn, as_role, &caller).ok()?;
     match event.as_str() {
-        "Stop" | "SubagentStop" => stop(&conn, &me, linger).ok()?,
+        // A quick launched session answers and ends: it never waits for replies to its reply.
+        "Stop" | "SubagentStop" => {
+            let launched = std::env::var("TINCAN_LAUNCHED").is_ok_and(|v| !v.is_empty());
+            stop(&conn, &me, if launched { 0.0 } else { linger }).ok()?
+        }
         "PostToolUse" => {
             let new = untold(&conn, &me.role, true).ok()?;
             if new.is_empty() {
