@@ -36,13 +36,15 @@ pub fn builtins() -> Vec<Profile> {
             marker_env: strs(&["CLAUDECODE"]),
             busy_text: Some("esc to interrupt".into()),
             hooks_file: Some(".claude/settings.local.json".into()),
-            // Read-only tools need no approval; Bash is limited to tincan itself.
+            // A launched Claude can be handed work, so it may edit files and use the shell.
             launch: Some(strs(&[
                 "claude",
                 "-p",
                 "{prompt}",
+                "--permission-mode",
+                "acceptEdits",
                 "--allowedTools",
-                "Bash(tincan:*)",
+                "Bash",
             ])),
         },
         Profile {
