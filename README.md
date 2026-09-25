@@ -2,7 +2,7 @@
 
 # tincan
 
-Let your coding agents talk to each other. `tincan` is a small local CLI that lets Claude Code, Codex, opencode and other agent sessions on the same machine send each other messages, so you stop being the copy-paste bus between terminals.
+Let your coding agents talk to each other. `tincan` is a small local CLI that lets Claude Code, Codex, Grok, opencode and other agent sessions on the same machine send each other messages, so you stop being the copy-paste bus between terminals.
 
 - **One binary, no daemon, no network.** A team is one SQLite file in `<project>/.tincan/`.
 - **Fast.** About 9 ms per command.
@@ -36,10 +36,13 @@ What's been run end to end, and on what. Anything not listed here is untested.
 | Claude Code | 2.1.282 | claude-haiku-4-5 | Round trip, broadcast |
 | Codex CLI | 0.155.1 | gpt-5.6-sol | Round trip, broadcast; interactive TUI woken by the cmux driver |
 | opencode | 1.18.30 | opencode/big-pickle | Round trip, broadcast |
+| Grok CLI | 1.0.41 | grok-4.7 | Round trip, broadcast; harness auto-detected; Stop hook held it for a reply |
 
-Not yet tested: the Grok CLI (`grok`) and tmux wake, both built in, and opencode with OpenRouter models (listed in `tests/live/harnesses.json`, needs `OPENROUTER_API_KEY`). Any other harness works with `--as ROLE` or `TINCAN_ROLE`.
+Not yet tested: tmux wake (built in), and opencode with OpenRouter models (listed in `tests/live/harnesses.json`, needs `OPENROUTER_API_KEY`). Any other harness works with `--as ROLE` or `TINCAN_ROLE`.
 
 Cloud-hosted agents (Grok Bot, cloud sandboxes, CI) aren't supported: the skill tells them to ask you to run the session locally.
+
+**Direct pairs.** Claude Code ↔ Codex, Claude Code ↔ Grok and Codex ↔ Grok each sent a question and got the answer back, in both directions, with Codex running as an interactive TUI in cmux.
 
 **Terminal wake.** cmux and herdr were tested with real sessions. The `cmd:` driver is covered by the test suite.
 
@@ -105,12 +108,12 @@ An agent sitting idle won't check its inbox on its own. Pick what fits each sess
 
 | How | Works with | Setup |
 | --- | --- | --- |
-| Hooks | Claude Code, Codex | Included in the Claude Code plugin. Otherwise `tincan hooks --harness claude` (or `codex`) prints the config and the file to merge it into. The Stop hook blocks once per new message; `--linger 120` keeps an agent alive for replies to its own questions. |
+| Hooks | Claude Code, Codex, Grok | Included in the Claude Code plugin. Otherwise `tincan hooks --harness claude` (or `codex`) prints the config and the file to merge it into. The Stop hook blocks once per new message; `--linger 120` keeps an agent alive for replies to its own questions. |
 | Background wait | Claude Code | Run `tincan wait --timeout 3600` as a background task. It exits when mail lands. |
 | Terminal nudge | Any TUI in tmux, cmux, herdr, … | `tincan register ROLE --wake auto`. Senders type a short nudge into the idle pane, never over a running turn. |
 | Anything else | Scripts, notifiers | `--wake cmd:'<shell>'` runs with `TINCAN_WAKE_ROLE`, `TINCAN_WAKE_UNREAD`, `TINCAN_WAKE_TEXT`. |
 
-Codex runs project hooks only after you trust them in `/hooks`.
+Codex runs project hooks only after you trust them in `/hooks`. Grok runs project hooks (`tincan hooks --harness grok` → `.grok/hooks/tincan.json`) only in a trusted folder (`/hooks-trust` or `grok --trust`) that is a git repository.
 
 ## Fan-out
 

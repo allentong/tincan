@@ -883,7 +883,19 @@ fn hooks_config_per_harness() {
     let (_, o) = exec(None, &["hooks", "--harness", "codex"], Opts::default());
     assert_eq!(o["file"], ".codex/hooks.json");
     assert!(o["config"]["hooks"].get("Stop").is_some());
-    let (rc, o) = exec(None, &["hooks", "--harness", "grok"], Opts::default());
+    let (_, o) = exec(None, &["hooks", "--harness", "grok"], Opts::default());
+    assert_eq!(o["file"], ".grok/hooks/tincan.json");
+    // A harness without command hooks is told to use a wake driver or `wait` instead.
+    let t = Team::new();
+    let prof = t.write("harnesses.json", &json!([{"name": "aider"}]).to_string());
+    let (rc, o) = exec(
+        None,
+        &["hooks", "--harness", "aider"],
+        Opts {
+            env: &[("TINCAN_HARNESSES", prof.as_str())],
+            ..Opts::default()
+        },
+    );
     assert_eq!((rc, o["error"].as_str()), (2, Some("usage")));
 }
 

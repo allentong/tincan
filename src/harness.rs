@@ -46,9 +46,9 @@ pub fn builtins() -> Vec<Profile> {
             name: "grok".into(),
             process_names: strs(&["grok"]),
             session_env: strs(&["GROK_SESSION_ID"]),
-            marker_env: vec![],
+            marker_env: strs(&["GROK_SESSION_ID"]),
             busy_text: None,
-            hooks_file: None,
+            hooks_file: Some(".grok/hooks/tincan.json".into()),
         },
     ]
 }
