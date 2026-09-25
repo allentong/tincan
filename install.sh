@@ -29,4 +29,6 @@ tar -xzf "$tmp/$asset" -C "$tmp"
 mkdir -p "$dir"
 install -m 755 "$tmp/tincan" "$dir/tincan"
 echo "Installed $("$dir/tincan" --version) to $dir/tincan"
+# The skill ships in the binary: put it where Claude Code, Codex and Grok look for skills.
+"$dir/tincan" install-skills >/dev/null && echo "Installed the tincan skill for Claude Code, Codex and Grok"
 case ":$PATH:" in *":$dir:"*) ;; *) echo "Add $dir to your PATH." ;; esac

@@ -27,6 +27,13 @@ fn clean_command() -> Command {
             cmd.env(&k, v);
         }
     }
+    // Not an agent session unless a test says so, so nothing auto-registers by accident.
+    cmd.env("TINCAN_OWNER_PID", "0");
+    // A throwaway home, so the per-user default team and config never touch the real one.
+    let home = std::env::temp_dir().join(format!("tincan-home-{}", std::process::id()));
+    cmd.env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("LOCALAPPDATA", home.join("appdata"));
     cmd
 }
 
@@ -327,7 +334,7 @@ fn ac4_concurrent_sends_consistent() {
     t.reg("grok", "grok");
     const N: usize = 60;
     const WORKERS: usize = 16;
-    let codes: Vec<i32> = thread::scope(|s| {
+    let results: Vec<(i32, Value)> = thread::scope(|s| {
         let t = &t;
         let handles: Vec<_> = (0..WORKERS)
             .map(|w| {
@@ -342,7 +349,7 @@ fn ac4_concurrent_sends_consistent() {
                             };
                             let body = format!("{a}-{i}");
                             let cid = format!("c{i}");
-                            t.run(&["--as", a, "send", b, &body, "--client-id", &cid]).0
+                            t.run(&["--as", a, "send", b, &body, "--client-id", &cid])
                         })
                         .collect::<Vec<_>>()
                 })
@@ -353,7 +360,12 @@ fn ac4_concurrent_sends_consistent() {
             .flat_map(|h| h.join().unwrap())
             .collect()
     });
-    assert_eq!(codes, vec![0; N]);
+    let failed: Vec<_> = results.iter().filter(|(rc, _)| *rc != 0).collect();
+    assert!(
+        failed.is_empty(),
+        "{} of {N} sends failed: {failed:?}",
+        failed.len()
+    );
     // pending mail survives the senders exiting; each side gets exactly its half, no dupes
     t.kill_all();
     let g = t.out(&["--as", "grok", "inbox"]);
@@ -403,20 +415,6 @@ fn role_collision_rejected() {
     let p = t.owner();
     let (rc, o) = t.run(&["register", "claude", "--pid", &p.to_string()]);
     assert_eq!((rc, o["error"].as_str()), (5, Some("role_taken")));
-}
-
-#[test]
-fn no_team_dir_fails_loud() {
-    let d = TmpDir::new();
-    let (rc, o) = exec(
-        None,
-        &["peers"],
-        Opts {
-            cwd: Some(&d.0),
-            ..Opts::default()
-        },
-    );
-    assert_eq!((rc, o["error"].as_str()), (2, Some("no_team")));
 }
 
 #[test]
@@ -484,7 +482,11 @@ fn identity_inferred_from_session_env() {
     let mut t = Team::new();
     let p = t.owner();
     // CLAUDECODE marks the harness when no claude process is an ancestor (CI).
-    let env = [("CLAUDE_CODE_SESSION_ID", "sess-1"), ("CLAUDECODE", "1")];
+    let env = [
+        ("CLAUDE_CODE_SESSION_ID", "sess-1"),
+        ("CLAUDECODE", "1"),
+        ("TINCAN_OWNER_PID", ""),
+    ];
     t.env(&["register", "claude", "--pid", &p.to_string()], &env);
     let (rc, o) = t.env(&["whoami"], &env);
     assert_eq!((rc, o["role"].as_str()), (0, Some("claude")));
@@ -950,7 +952,7 @@ fn cmd_driver_nudges_once_per_new_message() {
         t.out(&["--as", "a", "send", "b", "1"])["wake"],
         json!({"b": "nudged"})
     );
-    // recipient hasn't read yet; a Stop hook or earlier nudge already told it about seq<=1
+    // recipient hasn't read yet, but message 2 is new, so it gets its own nudge
     assert_eq!(
         t.out(&["--as", "a", "send", "b", "2"])["wake"],
         json!({"b": "nudged"})
@@ -1256,20 +1258,170 @@ fn invalid_entry_skipped_valid_one_loaded() {
 // ---- local-only ----
 
 #[test]
-fn no_team_error_points_remote_agents_to_run_locally() {
+fn unusable_team_dir_points_remote_agents_to_run_locally() {
     let d = TmpDir::new();
-    let (rc, o) = exec(
-        None,
-        &["inbox"],
-        Opts {
-            cwd: Some(&d.0),
-            ..Opts::default()
-        },
-    );
+    let file = d.0.join("not-a-dir");
+    std::fs::write(&file, "").unwrap();
+    let (rc, o) = exec(Some(&file), &["inbox"], Opts::default());
     assert_eq!((rc, o["error"].as_str()), (2, Some("no_team")));
     let hint = o["hint"].as_str().unwrap();
     assert!(hint.contains("local-only"));
     assert!(hint.contains("run this session locally"));
+}
+
+// ---- zero-config ----
+
+/// A session as an agent harness would run it: its own owner PID, detected as `harness`.
+fn agent_env<'a>(pid: &'a str, marker: &'a str) -> [(&'a str, &'a str); 2] {
+    [("TINCAN_OWNER_PID", pid), (marker, "1")]
+}
+
+#[test]
+fn team_auto_created_at_git_root() {
+    let d = TmpDir::new();
+    std::fs::create_dir_all(d.0.join(".git")).unwrap();
+    let sub = d.0.join("src/deep");
+    std::fs::create_dir_all(&sub).unwrap();
+    let (rc, o) = exec(
+        None,
+        &["peers"],
+        Opts {
+            cwd: Some(&sub),
+            ..Opts::default()
+        },
+    );
+    assert_eq!(rc, 0, "{o}");
+    assert!(d.0.join(".tincan/.gitignore").is_file());
+    assert!(!sub.join(".tincan").exists());
+    assert!(o["setup"].as_str().unwrap().contains("Created team"), "{o}");
+    // second call: nothing new to confirm
+    let (_, o) = exec(
+        None,
+        &["peers"],
+        Opts {
+            cwd: Some(&sub),
+            ..Opts::default()
+        },
+    );
+    assert!(o.get("setup").is_none(), "{o}");
+}
+
+#[test]
+fn worktrees_share_the_main_checkout_team() {
+    let d = TmpDir::new();
+    let main = d.0.join("repo");
+    std::fs::create_dir_all(main.join(".git/worktrees/feat")).unwrap();
+    let wt = d.0.join("repo-feat");
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(
+        wt.join(".git"),
+        format!("gitdir: {}\n", main.join(".git/worktrees/feat").display()),
+    )
+    .unwrap();
+    let (rc, o) = exec(
+        None,
+        &["peers"],
+        Opts {
+            cwd: Some(&wt),
+            ..Opts::default()
+        },
+    );
+    assert_eq!(rc, 0, "{o}");
+    assert!(main.join(".tincan").is_dir());
+    assert!(!wt.join(".tincan").exists());
+}
+
+#[test]
+fn team_outside_any_repo_uses_per_user_default() {
+    let d = TmpDir::new();
+    let home = d.0.join("home");
+    let cwd = d.0.join("scratch");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let home_s = home.to_string_lossy().into_owned();
+    let appdata = home.join("appdata");
+    let appdata_s = appdata.to_string_lossy().into_owned();
+    let env = [
+        ("HOME", home_s.as_str()),
+        ("USERPROFILE", home_s.as_str()),
+        ("LOCALAPPDATA", appdata_s.as_str()),
+    ];
+    let (rc, o) = exec(
+        None,
+        &["peers"],
+        Opts {
+            env: &env,
+            cwd: Some(&cwd),
+            ..Opts::default()
+        },
+    );
+    assert_eq!(rc, 0, "{o}");
+    assert!(appdata.join("tincan/default/.tincan").is_dir(), "{o}");
+    assert!(!cwd.join(".tincan").exists());
+}
+
+#[test]
+fn agent_session_auto_registers_as_harness_name() {
+    let mut t = Team::new();
+    let (a, b) = (t.owner().to_string(), t.owner().to_string());
+    // first command from a fresh session registers it and says so
+    let (rc, o) = t.env(&["whoami"], &agent_env(&a, "CLAUDECODE"));
+    assert_eq!((rc, o["role"].as_str()), (0, Some("claude")), "{o}");
+    assert!(o["setup"].as_str().unwrap().contains("'claude'"), "{o}");
+    // a second live claude session gets the next free name
+    let (_, o) = t.env(&["peers"], &agent_env(&b, "CLAUDECODE"));
+    assert!(o["setup"].as_str().unwrap().contains("'claude-2'"), "{o}");
+    assert_eq!(roles(&o), ["claude", "claude-2"]);
+    // and can message the first with no setup at all
+    let (rc, o) = t.env(&["send", "claude", "hi"], &agent_env(&b, "CLAUDECODE"));
+    assert_eq!(rc, 0, "{o}");
+    let (_, o) = t.env(&["inbox"], &agent_env(&a, "CLAUDECODE"));
+    assert_eq!(o["messages"][0]["from"], "claude-2");
+}
+
+#[test]
+fn renaming_an_auto_registered_session_keeps_one_role() {
+    let mut t = Team::new();
+    let p = t.owner().to_string();
+    let env = agent_env(&p, "CLAUDECODE");
+    t.env(&["whoami"], &env);
+    // re-registering its own name (e.g. to add a wake driver) isn't a conflict
+    let (rc, o) = t.env(&["register", "claude", "--wake", "none"], &env);
+    assert_eq!(rc, 0, "{o}");
+    // a custom name replaces the automatic one
+    let (rc, o) = t.env(&["register", "reviewer"], &env);
+    assert_eq!(rc, 0, "{o}");
+    assert_eq!(roles(&t.out(&["peers"])), ["reviewer"]);
+    let (_, o) = t.env(&["whoami"], &env);
+    assert_eq!(o["role"], "reviewer");
+}
+
+#[test]
+fn plain_shell_is_not_auto_registered() {
+    let t = Team::new();
+    let (rc, o) = t.run(&["whoami"]);
+    assert_eq!((rc, o["error"].as_str()), (6, Some("not_registered")));
+    assert_eq!(roles(&t.out(&["peers"])).len(), 0);
+}
+
+#[test]
+fn session_start_hook_registers_and_confirms() {
+    let mut t = Team::new();
+    let p = t.owner().to_string();
+    let env = agent_env(&p, "CLAUDECODE");
+    let (rc, o) = t.with(
+        &["hook", "--event", "SessionStart"],
+        Opts {
+            env: &env,
+            stdin: Some(r#"{"session_id":"s-9","hook_event_name":"SessionStart"}"#),
+            ..Opts::default()
+        },
+    );
+    assert_eq!(rc, 0);
+    let ctx = o["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(ctx.contains("Registered this session as 'claude'"), "{ctx}");
+    assert_eq!(roles(&t.out(&["peers"])), ["claude"]);
 }
 
 #[test]
@@ -1279,10 +1431,6 @@ fn init_without_team_dir_initialises_cwd() {
         cwd: Some(&d.0),
         ..Opts::default()
     };
-    // other commands still refuse a dir with no team, and the hint points a local agent at `init`
-    let (rc, o) = exec(None, &["peers"], opts);
-    assert_eq!(rc, 2);
-    assert!(o["hint"].as_str().unwrap().contains("tincan init"), "{o}");
     let (rc, o) = exec(None, &["init"], opts);
     assert_eq!(rc, 0, "{o}");
     assert!(d.0.join(".tincan").is_dir());
@@ -1317,4 +1465,57 @@ fn bad_roles_and_durations_rejected() {
         let (rc, _) = t.run(&["--as", "a", "wait", "--timeout", bad]);
         assert_eq!(rc, 2, "{bad}");
     }
+}
+
+#[test]
+fn install_skills_puts_the_skill_where_harnesses_look() {
+    let d = TmpDir::new();
+    let home = d.0.to_string_lossy().into_owned();
+    let env = [("HOME", home.as_str()), ("USERPROFILE", home.as_str())];
+    let opts = Opts {
+        env: &env,
+        ..Opts::default()
+    };
+    let (rc, o) = exec(None, &["install-skills"], opts);
+    assert_eq!(rc, 0, "{o}");
+    for p in [
+        ".agents/skills/tincan/SKILL.md",
+        ".claude/skills/tincan/SKILL.md",
+    ] {
+        let text = std::fs::read_to_string(d.0.join(p)).unwrap();
+        assert!(text.starts_with("---\nname: tincan"), "{p}");
+    }
+    // with the Claude Code plugin installed, its own copy is used instead
+    std::fs::remove_dir_all(d.0.join(".claude/skills")).unwrap();
+    std::fs::create_dir_all(d.0.join(".claude/plugins/cache/tincan")).unwrap();
+    let (_, o) = exec(None, &["install-skills"], opts);
+    assert_eq!(o["skipped"][0]["for"], "claude", "{o}");
+    assert!(!d.0.join(".claude/skills/tincan").exists());
+}
+
+#[test]
+fn message_ids_are_uuid_v7() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    let id = t.out(&["--as", "a", "send", "b", "hi"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // 8-4-4-4-12 hex, version nibble 7
+    let parts: Vec<&str> = id.split('-').collect();
+    assert_eq!(
+        parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+        [8, 4, 4, 4, 12],
+        "{id}"
+    );
+    assert!(
+        id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+        "{id}"
+    );
+    assert!(parts[2].starts_with('7'), "{id}");
+    assert_eq!(
+        t.out(&["--as", "b", "inbox"])["messages"][0]["id"],
+        id.as_str()
+    );
 }

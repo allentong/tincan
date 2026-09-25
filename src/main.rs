@@ -106,6 +106,8 @@ pub enum Cmd {
         #[arg(long)]
         harness: String,
     },
+    /// Install the tincan skill for Claude Code, Codex and Grok (the installers run this)
+    InstallSkills,
 }
 
 fn main() {
@@ -125,14 +127,22 @@ fn main() {
         )),
     };
     match commands::run(cli) {
-        Ok(Some(v)) => println!("{v}"),
+        Ok(Some(v)) => println!("{}", with_setup(v)),
         Ok(None) => {}
         Err(e) => fail(e),
     }
 }
 
+/// Anything tincan set up on its own (a team, a registration) is confirmed in the output.
+fn with_setup(mut v: serde_json::Value) -> serde_json::Value {
+    if let (Some(obj), Some(setup)) = (v.as_object_mut(), store::take_notes()) {
+        obj.insert("setup".into(), setup.into());
+    }
+    v
+}
+
 fn fail(e: TincanError) -> ! {
-    println!("{}", e.to_json());
+    println!("{}", with_setup(e.to_json()));
     std::process::exit(e.code.exit());
 }
 

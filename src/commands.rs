@@ -1,10 +1,11 @@
 use crate::error::{Code, Result, TincanError};
-use crate::identity::{self, LazyCaller, PEER_COLS, Peer, PeerState, peer_from_row, touch, whoami};
+use crate::identity::{
+    self, LazyCaller, PEER_COLS, Peer, PeerState, me, peer_from_row, touch, whoami,
+};
 use crate::store::{connect, now, resolve_team};
 use crate::{Cli, Cmd, harness, hooks, wake};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use serde_json::{Value, json};
-use std::hash::{BuildHasher, Hasher};
 use std::io::{Read, Write};
 
 pub const MAX_BODY: usize = 8 * 1024;
@@ -44,6 +45,7 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
         Cmd::Hook { event, linger } => Ok(hooks::run(team, as_role, &event, linger)),
         Cmd::Hooks { harness } => hooks::config(&harness),
         Cmd::Extensions => Ok(Some(extensions())),
+        Cmd::InstallSkills => install_skills(),
         cmd => {
             let (_, db) = resolve_team(team, false)?;
             let mut conn = connect(&db)?;
@@ -57,7 +59,11 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                 } => register(&mut conn, &caller, role, harness, pid, wake),
                 Cmd::Unregister => unregister(&conn, as_role, &caller),
                 Cmd::Whoami => whoami_cmd(&conn, as_role, &caller),
-                Cmd::Peers { all } => peers(&conn, all),
+                Cmd::Peers { all } => {
+                    // Listing peers joins the team too, so a fresh session shows up for others.
+                    let _ = me(&conn, as_role, &caller);
+                    peers(&conn, all)
+                }
                 Cmd::Send {
                     to,
                     body,
@@ -85,7 +91,11 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                     replies_to: Some(id),
                 } => wait_replies(&conn, as_role, &caller, &id, timeout),
                 Cmd::Wait { timeout, .. } => wait(&conn, as_role, &caller, timeout),
-                Cmd::Init | Cmd::Hook { .. } | Cmd::Hooks { .. } | Cmd::Extensions => {
+                Cmd::Init
+                | Cmd::Hook { .. }
+                | Cmd::Hooks { .. }
+                | Cmd::Extensions
+                | Cmd::InstallSkills => {
                     unreachable!()
                 }
             }
@@ -113,12 +123,7 @@ fn register(
     pid: Option<i64>,
     wake: Option<String>,
 ) -> Result<Option<Value>> {
-    let valid = !role.is_empty()
-        && role.len() <= 64
-        && role
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    if !valid {
+    if !identity::valid_role(&role) {
         return Err(TincanError::new(
             Code::Usage,
             format!("invalid role {role:?}: use 1-64 letters, digits, '-', '_' or '.'"),
@@ -143,7 +148,8 @@ fn register(
     let existing = identity::get_peer(&tx, &role)?;
     let mut dropped = 0;
     if let Some(p) = &existing {
-        let same_session = p.session_key.is_some() && p.session_key == caller.session_key;
+        let same_session = (p.session_key.is_some() && p.session_key == caller.session_key)
+            || (p.pid.is_some() && p.pid == pid);
         if p.state() == PeerState::Active && !same_session {
             return Err(TincanError::new(
                 Code::RoleTaken,
@@ -164,6 +170,12 @@ fn register(
            pid = excluded.pid, registered_at = excluded.registered_at, last_seen = excluded.last_seen,
            status = 'active', wake = excluded.wake",
         params![role, harness, caller.session_key, pid, t, wake],
+    )?;
+    // One role per session: taking a new name (say, after auto-registration) releases the old one.
+    tx.execute(
+        "UPDATE peers SET status = 'gone' WHERE role != ?1 AND status = 'active'
+           AND ((session_key IS NOT NULL AND session_key IS ?2) OR (pid IS NOT NULL AND pid IS ?3))",
+        params![role, caller.session_key, pid],
     )?;
     tx.commit()?;
     Ok(Some(
@@ -216,7 +228,7 @@ fn whoami_cmd(
     as_role: Option<&str>,
     caller: &LazyCaller,
 ) -> Result<Option<Value>> {
-    let me = whoami(conn, as_role, caller)?;
+    let me = me(conn, as_role, caller)?;
     touch(conn, &me.role)?;
     let unread = unread_count(conn, &me.role, false)?;
     Ok(Some(
@@ -249,11 +261,9 @@ struct SendOpts {
     no_reply: bool,
 }
 
-fn new_message_id(t: f64) -> String {
-    let rand = std::collections::hash_map::RandomState::new()
-        .build_hasher()
-        .finish();
-    format!("m_{:013}_{:08x}", (t * 1000.0) as u64, rand as u32)
+/// UUIDv7: globally unique and time-ordered, so ids sort roughly by send time.
+fn new_message_id() -> String {
+    uuid::Uuid::now_v7().to_string()
 }
 
 fn send(
@@ -280,7 +290,7 @@ fn send(
             ),
         ));
     }
-    let me = whoami(conn, as_role, caller)?;
+    let me = me(conn, as_role, caller)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     touch(&tx, &me.role)?;
     sweep(&tx)?;
@@ -387,7 +397,7 @@ fn send(
     };
 
     let t = now();
-    let id = new_message_id(t);
+    let id = new_message_id();
     tx.execute(
         "INSERT INTO messages(id, sender, client_id, kind, body, reply_to, hop, no_reply, created_at, recipients)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -422,16 +432,16 @@ fn wake_peers(conn: &Connection, peers: impl Iterator<Item = Peer>) -> Result<Va
             report.insert(p.role, "bad_spec".into());
             continue;
         };
-        let (newest, unread): (i64, i64) = conn.query_row(
-            "SELECT COALESCE(MAX(m.seq), 0), COUNT(*) FROM deliveries d JOIN messages m ON m.id = d.message_id
-             WHERE d.recipient = ?1",
-            [&p.role],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        if newest <= p.told_seq {
+        let new = untold(conn, &p.role, false)?;
+        if new.is_empty() {
             report.insert(p.role, "already_told".into());
             continue;
         }
+        let unread: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM deliveries WHERE recipient = ?1",
+            [&p.role],
+            |r| r.get(0),
+        )?;
         let busy_text = harness::find(&p.harness).and_then(|h| h.busy_text);
         if let (Some(busy), Some(screen)) = (busy_text, driver.screen())
             && screen.contains(&busy)
@@ -447,7 +457,7 @@ fn wake_peers(conn: &Connection, peers: impl Iterator<Item = Peer>) -> Result<Va
         ];
         let outcome = match driver.nudge(&text, &env) {
             Ok(()) => {
-                mark_told(conn, &p.role, newest)?;
+                mark_told(conn, &p.role, &new)?;
                 "nudged".to_string()
             }
             Err(e) => format!("failed: {e}"),
@@ -464,11 +474,26 @@ pub fn nudge_text(role: &str, unread: i64) -> String {
     )
 }
 
-pub fn mark_told(conn: &Connection, role: &str, seq: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE peers SET told_seq = MAX(told_seq, ?1) WHERE role = ?2",
-        params![seq, role],
+/// Ids of pending messages this peer hasn't been told about yet. `readable` skips ones leased
+/// by an inbox call in flight (a hook shouldn't point at mail that's being read right now).
+pub fn untold(conn: &Connection, role: &str, readable: bool) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT message_id FROM deliveries WHERE recipient = ?1 AND told = 0
+           AND (?3 = 0 OR lease_until IS NULL OR lease_until < ?2)",
     )?;
+    let ids = stmt
+        .query_map(params![role, now(), readable], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(ids)
+}
+
+/// Mark exactly these deliveries as told, so mail that lands meanwhile still gets its own nudge.
+pub fn mark_told(conn: &Connection, role: &str, ids: &[String]) -> Result<()> {
+    let mut stmt =
+        conn.prepare("UPDATE deliveries SET told = 1 WHERE recipient = ?1 AND message_id = ?2")?;
+    for id in ids {
+        stmt.execute(params![role, id])?;
+    }
     Ok(())
 }
 
@@ -483,7 +508,7 @@ fn inbox(
     count: bool,
     require_ack: bool,
 ) -> Result<Option<Value>> {
-    let me = whoami(conn, as_role, caller)?;
+    let me = me(conn, as_role, caller)?;
     touch(conn, &me.role)?;
     if count {
         let unread = unread_count(conn, &me.role, false)?;
@@ -497,7 +522,7 @@ fn inbox(
             "SELECT m.id, m.sender, m.kind, m.body, m.reply_to, m.hop, m.no_reply
              FROM deliveries d JOIN messages m ON m.id = d.message_id
              WHERE d.recipient = ?1 AND (d.lease_until IS NULL OR d.lease_until < ?2)
-             ORDER BY m.seq",
+             ORDER BY m.created_at, m.id",
         )?;
         stmt.query_map(params![me.role, t], |r| {
             Ok(json!({"id": r.get::<_, String>(0)?, "from": r.get::<_, String>(1)?, "kind": r.get::<_, String>(2)?,
@@ -556,7 +581,7 @@ fn ack(
     caller: &LazyCaller,
     ids: &[String],
 ) -> Result<Option<Value>> {
-    let me = whoami(conn, as_role, caller)?;
+    let me = me(conn, as_role, caller)?;
     touch(conn, &me.role)?;
     let mut acked = 0;
     for id in ids {
@@ -575,7 +600,7 @@ fn wait(
     caller: &LazyCaller,
     timeout: f64,
 ) -> Result<Option<Value>> {
-    let me = whoami(conn, as_role, caller)?;
+    let me = me(conn, as_role, caller)?;
     let deadline = now() + timeout;
     loop {
         let n = unread_count(conn, &me.role, true)?;
@@ -598,7 +623,7 @@ fn wait_replies(
     id: &str,
     timeout: f64,
 ) -> Result<Option<Value>> {
-    let me = whoami(conn, as_role, caller)?;
+    let me = me(conn, as_role, caller)?;
     let (sender, recipients): (String, String) = conn
         .query_row(
             "SELECT sender, recipients FROM messages WHERE id = ?1",
@@ -672,4 +697,32 @@ fn sweep(conn: &Connection) -> Result<()> {
         [t - stub_secs()],
     )?;
     Ok(())
+}
+
+/// The skill ships inside the binary, so installing tincan is the only setup step.
+const SKILL: &str = include_str!("../skills/tincan/SKILL.md");
+
+/// Writes the skill where Codex and Grok (`~/.agents/skills`) and Claude Code (`~/.claude/skills`)
+/// look for it. Skips Claude Code when the plugin, which carries its own copy, is installed.
+fn install_skills() -> Result<Option<Value>> {
+    let home = harness::home().ok_or_else(|| TincanError::new(Code::Usage, "no home dir"))?;
+    let mut installed = vec![];
+    let mut skipped = vec![];
+    let targets = [
+        ("codex, grok", home.join(".agents/skills/tincan")),
+        ("claude", home.join(".claude/skills/tincan")),
+    ];
+    for (who, dir) in targets {
+        if who == "claude" && home.join(".claude/plugins/cache/tincan").is_dir() {
+            skipped.push(json!({"for": who, "reason": "the tincan plugin is installed"}));
+            continue;
+        }
+        std::fs::create_dir_all(&dir)
+            .and_then(|_| std::fs::write(dir.join("SKILL.md"), SKILL))
+            .map_err(|e| TincanError::new(Code::Usage, format!("{}: {e}", dir.display())))?;
+        installed.push(json!({"for": who, "path": dir.join("SKILL.md")}));
+    }
+    Ok(Some(
+        json!({"ok": true, "installed": installed, "skipped": skipped}),
+    ))
 }
