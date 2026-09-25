@@ -57,7 +57,8 @@ pub enum Cmd {
         all: bool,
     },
     /// Send a DM (`<role>`) or broadcast (`'*'`); body `-` reads stdin. A DM to a harness name
-    /// (claude, codex, grok) with no session running starts a quick one to answer it
+    /// (claude, codex, grok) with no session running starts one that answers and exits,
+    /// or with --stay keeps taking follow-ups until you're done
     Send {
         to: String,
         body: String,
@@ -69,9 +70,16 @@ pub enum Cmd {
         /// FYI only: replies to this message are rejected
         #[arg(long)]
         no_reply: bool,
-        /// Fail instead of starting a quick headless session when the recipient isn't running
-        #[arg(long)]
+        /// Fail instead of starting a headless session when the recipient isn't running
+        #[arg(long, conflicts_with = "new")]
         no_launch: bool,
+        /// A started session stays for follow-ups, and can ask you questions, until you tell
+        /// it it's done or your session ends
+        #[arg(long)]
+        stay: bool,
+        /// Start a fresh session (next free name, e.g. claude-2) even if one is running
+        #[arg(long)]
+        new: bool,
     },
     /// Read unread messages
     Inbox {

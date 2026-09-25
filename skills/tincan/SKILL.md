@@ -31,6 +31,8 @@ Run `tincan peers` first and follow the result:
 | Read, ack after acting | `tincan inbox --require-ack`, then `tincan ack <id>...` |
 | DM | `tincan send <role> "<text>"` |
 | Ask an agent that isn't running | `tincan send codex "<question>"`, then `tincan wait --replies-to <id>` |
+| Keep it for follow-ups | add `--stay`; it answers, may ask you questions, and stays until you send "you're done" or your session ends |
+| Start a fresh one anyway | add `--new` (it gets the next free name, e.g. `claude-2`) |
 | Reply | `tincan send <role> "<text>" --reply-to <id>` |
 | FYI, no answer wanted | `tincan send <role> "<text>" --no-reply` |
 | Broadcast | `tincan send '*' "<text>"` |

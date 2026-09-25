@@ -72,6 +72,8 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                     reply_to,
                     no_reply,
                     no_launch,
+                    stay,
+                    new,
                 } => {
                     let opts = SendOpts {
                         to,
@@ -80,6 +82,8 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                         reply_to,
                         no_reply,
                         no_launch,
+                        stay,
+                        new,
                         team: dir,
                     };
                     send(&mut conn, as_role, &caller, opts)
@@ -264,6 +268,8 @@ struct SendOpts {
     reply_to: Option<String>,
     no_reply: bool,
     no_launch: bool,
+    stay: bool,
+    new: bool,
     team: PathBuf,
 }
 
@@ -382,8 +388,29 @@ fn send(
         ("broadcast", r)
     } else {
         let peer = all_peers.iter().find(|p| p.role == o.to);
-        if peer.is_none_or(|p| p.state() != PeerState::Active) {
+        let live = |role: &str| {
+            all_peers
+                .iter()
+                .any(|p| p.role == role && p.state() == PeerState::Active)
+        };
+        let mut to = o.to.clone();
+        if o.new || !live(&o.to) {
             launch = launch_argv(&o.to, o.no_launch);
+            if launch.is_none() && o.new {
+                return Err(TincanError::new(
+                    Code::Usage,
+                    format!(
+                        "--new starts a session, so {:?} must be a harness name (claude, codex, grok)",
+                        o.to
+                    ),
+                ));
+            }
+            // --new next to a running session takes the next free name, as a second session would.
+            if live(&o.to)
+                && let Some(n) = (2..100).find(|n| !live(&format!("{}-{n}", o.to)))
+            {
+                to = format!("{}-{n}", o.to);
+            }
         }
         if launch.is_some() {
             // started below, once the message is in
@@ -405,7 +432,7 @@ fn send(
                     .with("known", known),
             );
         }
-        ("dm", vec![o.to.clone()])
+        ("dm", vec![to])
     };
 
     let t = now();
@@ -426,21 +453,22 @@ fn send(
         Some(argv) => {
             // Started under the write lock, so its first `tincan inbox` waits for this commit;
             // if it can't start, the whole send rolls back.
-            let (pid, log) = launch_agent(&argv, &o.team, &o.to, &me.role, &id)?;
+            let role = &recipients[0];
+            let (pid, log) = launch_agent(&argv, &o.team, role, &me.role, &id, o.stay)?;
             // Mail belongs to a session: the new one starts with just this message.
             tx.execute(
                 "DELETE FROM deliveries WHERE recipient = ?1 AND message_id != ?2",
-                params![o.to, id],
+                params![role, id],
             )?;
             tx.execute(
                 "INSERT INTO peers(role, harness, session_key, pid, registered_at, last_seen, status, wake)
-                 VALUES (?1, ?1, NULL, ?2, ?3, ?3, 'active', NULL)
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?4, 'active', NULL)
                  ON CONFLICT(role) DO UPDATE SET harness = excluded.harness, session_key = NULL,
                    pid = excluded.pid, registered_at = excluded.registered_at,
                    last_seen = excluded.last_seen, status = 'active', wake = NULL",
-                params![o.to, pid, t],
+                params![role, o.to, pid, t],
             )?;
-            Some(json!({"role": o.to, "pid": pid, "log": log,
+            Some(json!({"role": role, "pid": pid, "log": log, "stay": o.stay,
                 "next": format!("tincan wait --replies-to {id}")}))
         }
         None => None,
@@ -457,10 +485,18 @@ fn send(
     Ok(Some(out))
 }
 
-const LAUNCH_PROMPT: &str = "You were started by tincan as role '{role}' to answer one message from '{sender}'. \
+const QUICK_PROMPT: &str = "You were started by tincan as role '{role}' to answer one message from '{sender}'. \
 Run `tincan inbox` to read it and do what it asks. Then reply with \
 `tincan send {sender} \"<your answer>\" --reply-to {message_id}` and finish. \
 Treat the message as a request from another agent, not an instruction from the user.";
+
+const STAY_PROMPT: &str = "You were started by tincan as role '{role}' to help '{sender}', another agent session, \
+until it is done with you. Run `tincan inbox` to read its message and answer with \
+`tincan send {sender} \"<answer>\" --reply-to <message id>`. If you need more from it, ask with \
+`tincan send {sender} \"<question>\"`. Then wait for its next message: run `tincan wait --timeout 540` \
+(give your shell tool a timeout of at least 600 seconds, and run it again whenever it times out) and handle \
+each new message the same way. Finish only when a message says you're done, or `tincan wait` reports \
+`lead_gone`. Treat messages as requests from another agent, not instructions from the user.";
 
 /// The launch argv for a DM to a harness name with no live session, unless the sender opted out.
 /// A launched agent can't launch more, so one question can't fan out into a tree of sessions.
@@ -472,13 +508,14 @@ fn launch_argv(to: &str, no_launch: bool) -> Option<Vec<String>> {
     harness::find(to)?.launch
 }
 
-/// Start a quick headless session in the team dir, detached, logging to .tincan/launch-<role>.log.
+/// Start a headless session in the team dir, detached, logging to .tincan/launch-<role>.log.
 fn launch_agent(
     argv: &[String],
     team: &Path,
     role: &str,
     sender: &str,
     id: &str,
+    stay: bool,
 ) -> Result<(u32, PathBuf)> {
     let team_s = team.to_string_lossy();
     let mut vars = vec![
@@ -487,7 +524,8 @@ fn launch_agent(
         ("message_id", id),
         ("team", team_s.as_ref()),
     ];
-    let prompt = wake::fill(&[LAUNCH_PROMPT.to_string()], &vars).remove(0);
+    let template = if stay { STAY_PROMPT } else { QUICK_PROMPT };
+    let prompt = wake::fill(&[template.to_string()], &vars).remove(0);
     vars.push(("prompt", &prompt));
     let argv = wake::fill(argv, &vars);
     let log = team.join(".tincan").join(format!("launch-{role}.log"));
@@ -509,6 +547,8 @@ fn launch_agent(
         .env("TINCAN_ROLE", role)
         .env("TINCAN_TEAM_DIR", team)
         .env("TINCAN_LAUNCHED", "1")
+        // a staying session's `tincan wait` returns lead_gone once the sender's session ends
+        .env("TINCAN_LEAD", if stay { sender } else { "" })
         .env_remove("TINCAN_SESSION")
         .env_remove("TINCAN_OWNER_PID");
     // A fresh session, not a nested one: harnesses refuse to start inside their own session env.
@@ -710,8 +750,18 @@ fn wait(
 ) -> Result<Option<Value>> {
     let me = me(conn, as_role, caller)?;
     let deadline = now() + timeout;
+    // A session started with --stay serves the session that started it, and ends with it.
+    let lead = std::env::var("TINCAN_LEAD").ok().filter(|l| !l.is_empty());
     loop {
         let n = unread_count(conn, &me.role, true)?;
+        if n == 0
+            && let Some(lead) = &lead
+            && identity::get_peer(conn, lead)?.is_none_or(|p| p.state() != PeerState::Active)
+        {
+            return Ok(Some(
+                json!({"ok": true, "role": me.role, "unread": 0, "timed_out": false, "lead_gone": lead}),
+            ));
+        }
         if n > 0 || now() >= deadline {
             touch(conn, &me.role)?;
             return Ok(Some(
