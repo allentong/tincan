@@ -12,7 +12,6 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -50,16 +49,20 @@ fn timeout() -> f64 {
 }
 
 /// PATH with the tincan under test first, so harnesses run this build.
-fn path_env() -> String {
-    let dir = Path::new(BIN).parent().unwrap().display().to_string();
-    format!("{dir}:{}", std::env::var("PATH").unwrap_or_default())
+fn path_env() -> std::ffi::OsString {
+    let dir = Path::new(BIN).parent().unwrap().to_path_buf();
+    let rest = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&rest))).unwrap()
 }
 
 fn on_path(bin: &str) -> bool {
-    std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .any(|d| Path::new(d).join(bin).is_file())
+    let exts: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .any(|d| exts.iter().any(|e| d.join(format!("{bin}{e}")).is_file()))
 }
 
 fn skip_reason(h: &Value) -> Option<String> {
@@ -161,33 +164,47 @@ fn turn(h: &Value, team: &Path, role: &str, timeout: f64) -> Option<String> {
         let mut pipe = child.stdin.take().unwrap();
         let _ = pipe.write_all(prompt.as_bytes());
     }
-    let pid = child.id();
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    match rx.recv_timeout(Duration::from_secs_f64(timeout)) {
-        Ok(Ok(out)) => {
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let tail: String = text
-                .chars()
-                .rev()
-                .take(400)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            Some(tail)
-        }
-        _ => {
-            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-            None
+    // Drain output on threads so the harness never blocks on a full pipe; poll for exit so a
+    // timeout can still kill it.
+    let drain = |r: Option<Box<dyn std::io::Read + Send>>| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let out = drain(child.stdout.take().map(|r| Box::new(r) as _));
+    let err = drain(child.stderr.take().map(|r| Box::new(r) as _));
+    let deadline = Instant::now() + Duration::from_secs_f64(timeout);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(200));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
         }
     }
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.join().unwrap_or_default()),
+        String::from_utf8_lossy(&err.join().unwrap_or_default())
+    );
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(400)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    Some(tail)
 }
 
 fn round_trip(h: &Value, timeout: f64) -> (bool, f64, String, PathBuf) {
