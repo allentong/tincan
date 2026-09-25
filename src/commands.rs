@@ -46,6 +46,7 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
         Cmd::Hook { event, linger } => Ok(hooks::run(team, as_role, &event, linger)),
         Cmd::Hooks { harness } => hooks::config(&harness),
         Cmd::Extensions => Ok(Some(extensions())),
+        Cmd::InstallSkills => install_skills(),
         cmd => {
             let (_, db) = resolve_team(team, false)?;
             let mut conn = connect(&db)?;
@@ -91,7 +92,11 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                     replies_to: Some(id),
                 } => wait_replies(&conn, as_role, &caller, &id, timeout),
                 Cmd::Wait { timeout, .. } => wait(&conn, as_role, &caller, timeout),
-                Cmd::Init | Cmd::Hook { .. } | Cmd::Hooks { .. } | Cmd::Extensions => {
+                Cmd::Init
+                | Cmd::Hook { .. }
+                | Cmd::Hooks { .. }
+                | Cmd::Extensions
+                | Cmd::InstallSkills => {
                     unreachable!()
                 }
             }
@@ -680,4 +685,32 @@ fn sweep(conn: &Connection) -> Result<()> {
         [t - stub_secs()],
     )?;
     Ok(())
+}
+
+/// The skill ships inside the binary, so installing tincan is the only setup step.
+const SKILL: &str = include_str!("../skills/tincan/SKILL.md");
+
+/// Writes the skill where Codex and Grok (`~/.agents/skills`) and Claude Code (`~/.claude/skills`)
+/// look for it. Skips Claude Code when the plugin, which carries its own copy, is installed.
+fn install_skills() -> Result<Option<Value>> {
+    let home = harness::home().ok_or_else(|| TincanError::new(Code::Usage, "no home dir"))?;
+    let mut installed = vec![];
+    let mut skipped = vec![];
+    let targets = [
+        ("codex, grok", home.join(".agents/skills/tincan")),
+        ("claude", home.join(".claude/skills/tincan")),
+    ];
+    for (who, dir) in targets {
+        if who == "claude" && home.join(".claude/plugins/cache/tincan").is_dir() {
+            skipped.push(json!({"for": who, "reason": "the tincan plugin is installed"}));
+            continue;
+        }
+        std::fs::create_dir_all(&dir)
+            .and_then(|_| std::fs::write(dir.join("SKILL.md"), SKILL))
+            .map_err(|e| TincanError::new(Code::Usage, format!("{}: {e}", dir.display())))?;
+        installed.push(json!({"for": who, "path": dir.join("SKILL.md")}));
+    }
+    Ok(Some(
+        json!({"ok": true, "installed": installed, "skipped": skipped}),
+    ))
 }

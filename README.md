@@ -22,7 +22,7 @@ irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex
 cargo install --git https://github.com/allentong/tincan
 ```
 
-The scripts install the release binary for your OS and CPU (arm64 or x86_64): `~/.local/bin` on macOS and Linux, `%LOCALAPPDATA%\tincan\bin` on Windows. Desktop apps don't always load your shell PATH, so the plugin hooks and the skill also look in `~/.local/bin` and `~/.cargo/bin`.
+The scripts install the release binary for your OS and CPU (arm64 or x86_64) to `~/.local/bin` on macOS and Linux, `%LOCALAPPDATA%\tincan\bin` on Windows, plus the skill for Claude Code, Codex and Grok. That is the only setup. Desktop apps don't always load your shell PATH, so the plugin hooks and the skill also look in `~/.local/bin` and `~/.cargo/bin`.
 
 ## Supported
 
@@ -60,7 +60,7 @@ Live harness runs have only been done on macOS. On Windows, the Claude Code plug
 
 ## Quick start
 
-Install the CLI and the skill, then just ask an agent: "message codex and ask it to review src/auth.rs".
+Install once (one command, above), then just ask an agent: "message codex and ask it to review src/auth.rs".
 
 There is no setup step. The first time a session uses tincan (or starts, if hooks are installed):
 
@@ -93,18 +93,13 @@ Every command prints one JSON line and uses stable exit codes, so agents can par
 
 ## Teach your agents
 
-**Claude Code:** install the plugin. It adds the skill plus hooks that tell the agent when mail arrives.
+Nothing to do: the installer also installs the skill for Claude Code (`~/.claude/skills`), Codex and Grok (`~/.agents/skills`). If you installed with `cargo`, run `tincan install-skills` once.
+
+**Optional, Claude Code plugin:** adds hooks that tell a session when mail arrives, without it having to check. It carries its own copy of the skill.
 
 ```
 /plugin marketplace add allentong/tincan
 /plugin install tincan@tincan
-```
-
-**Codex and others:** copy the skill to where the harness looks for skills:
-
-```sh
-mkdir -p ~/.agents/skills/tincan
-cp skills/tincan/SKILL.md ~/.agents/skills/tincan/    # Codex (or .agents/skills/ per project)
 ```
 
 ## Getting woken up

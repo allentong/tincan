@@ -1461,3 +1461,29 @@ fn bad_roles_and_durations_rejected() {
         assert_eq!(rc, 2, "{bad}");
     }
 }
+
+#[test]
+fn install_skills_puts_the_skill_where_harnesses_look() {
+    let d = TmpDir::new();
+    let home = d.0.to_string_lossy().into_owned();
+    let env = [("HOME", home.as_str()), ("USERPROFILE", home.as_str())];
+    let opts = Opts {
+        env: &env,
+        ..Opts::default()
+    };
+    let (rc, o) = exec(None, &["install-skills"], opts);
+    assert_eq!(rc, 0, "{o}");
+    for p in [
+        ".agents/skills/tincan/SKILL.md",
+        ".claude/skills/tincan/SKILL.md",
+    ] {
+        let text = std::fs::read_to_string(d.0.join(p)).unwrap();
+        assert!(text.starts_with("---\nname: tincan"), "{p}");
+    }
+    // with the Claude Code plugin installed, its own copy is used instead
+    std::fs::remove_dir_all(d.0.join(".claude/skills")).unwrap();
+    std::fs::create_dir_all(d.0.join(".claude/plugins/cache/tincan")).unwrap();
+    let (_, o) = exec(None, &["install-skills"], opts);
+    assert_eq!(o["skipped"][0]["for"], "claude", "{o}");
+    assert!(!d.0.join(".claude/skills/tincan").exists());
+}

@@ -65,17 +65,17 @@ pub fn load() -> Vec<Profile> {
     out
 }
 
-/// `~/.config/tincan/<name>` on every OS; home is HOME, else USERPROFILE (Windows).
-pub fn config_file(name: &str) -> Option<std::path::PathBuf> {
+/// Home is HOME, else USERPROFILE (Windows).
+pub fn home() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|h| {
-            std::path::Path::new(&h)
-                .join(".config")
-                .join("tincan")
-                .join(name)
-        })
+        .map(std::path::PathBuf::from)
+}
+
+/// `~/.config/tincan/<name>` on every OS.
+pub fn config_file(name: &str) -> Option<std::path::PathBuf> {
+    home().map(|h| h.join(".config").join("tincan").join(name))
 }
 
 pub fn find(name: &str) -> Option<Profile> {
