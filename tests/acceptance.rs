@@ -1279,10 +1279,42 @@ fn init_without_team_dir_initialises_cwd() {
         cwd: Some(&d.0),
         ..Opts::default()
     };
-    // other commands still refuse a dir with no team
-    assert_eq!(exec(None, &["peers"], opts).0, 2);
+    // other commands still refuse a dir with no team, and the hint points a local agent at `init`
+    let (rc, o) = exec(None, &["peers"], opts);
+    assert_eq!(rc, 2);
+    assert!(o["hint"].as_str().unwrap().contains("tincan init"), "{o}");
     let (rc, o) = exec(None, &["init"], opts);
     assert_eq!(rc, 0, "{o}");
     assert!(d.0.join(".tincan").is_dir());
+    // mail must never be committed
+    let ignore = std::fs::read_to_string(d.0.join(".tincan/.gitignore")).unwrap();
+    assert_eq!(ignore.trim(), "*");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(d.0.join(".tincan"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
     assert_eq!(exec(None, &["peers"], opts).0, 0);
+}
+
+#[test]
+fn bad_roles_and_durations_rejected() {
+    let mut t = Team::new();
+    for role in ["*", "", "a b", "x\ny", &"r".repeat(65)] {
+        let (rc, o) = t.run(&["register", role, "--harness", "codex", "--pid", "0"]);
+        assert_eq!(
+            (rc, o["error"].as_str()),
+            (2, Some("usage")),
+            "{role:?}: {o}"
+        );
+    }
+    t.reg("a", "claude");
+    for bad in ["NaN", "inf", "-1"] {
+        let (rc, _) = t.run(&["--as", "a", "wait", "--timeout", bad]);
+        assert_eq!(rc, 2, "{bad}");
+    }
 }

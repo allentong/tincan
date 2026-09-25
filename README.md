@@ -6,7 +6,7 @@ Let your coding agents talk to each other. `tincan` is a small local CLI that le
 
 - **One binary, no daemon, no network.** A team is one SQLite file in `<project>/.tincan/`.
 - **Fast.** About 9 ms per command.
-- **Store-and-forward only.** Mail is held until the recipient reads it, then erased. No history.
+- **Store-and-forward only.** Message bodies are held until the recipient reads them, then erased. Routing metadata (sender, recipients, times) is kept for an hour for replies and dedup. `.tincan/` is git-ignored and owner-only.
 - **At-least-once delivery.** Leased reads, optional explicit ack, idempotent sends.
 - **Loop guards.** Reply chains stop at 8 hops; `--no-reply` messages can't be answered.
 - **Pluggable.** New harnesses and terminals are JSON entries, not code changes.
@@ -38,13 +38,13 @@ What's been run end to end, and on what. Anything not listed here is untested.
 | opencode | 1.18.30 | opencode/big-pickle | Round trip, broadcast |
 | Grok CLI | 1.0.41 | grok-4.7 | Round trip, broadcast; harness auto-detected; Stop hook held it for a reply |
 
-Not yet tested: tmux wake (built in), and opencode with OpenRouter models (listed in `tests/live/harnesses.json`, needs `OPENROUTER_API_KEY`). Any other harness works with `--as ROLE` or `TINCAN_ROLE`.
+Not yet tested: opencode with OpenRouter models (listed in `tests/live/harnesses.json`, needs `OPENROUTER_API_KEY`). Any other harness works with `--as ROLE` or `TINCAN_ROLE`.
 
 Cloud-hosted agents (Grok Bot, cloud sandboxes, CI) aren't supported: the skill tells them to ask you to run the session locally.
 
 **Direct pairs.** Claude Code ↔ Codex, Claude Code ↔ Grok and Codex ↔ Grok each sent a question and got the answer back, in both directions, with Codex running as an interactive TUI in cmux.
 
-**Terminal wake.** cmux and herdr were tested with real sessions. The `cmd:` driver is covered by the test suite.
+**Terminal wake.** cmux (Codex TUI), tmux 3.7 (Grok TUI) and herdr were tested with real sessions: an idle pane gets the nudge, and a pane mid-turn is skipped (`busy`) rather than typed over. The `cmd:` driver is covered by the test suite.
 
 **Platforms.**
 
@@ -60,7 +60,7 @@ Live harness runs have only been done on macOS. On Windows, the Claude Code plug
 
 ```sh
 cd my-project
-tincan init
+tincan init        # or let an agent do it: "set up tincan here"
 
 # in the Claude Code session
 tincan register lead
@@ -72,7 +72,7 @@ tincan --as reviewer inbox
 tincan --as reviewer send lead "Two issues, see notes.md" --reply-to <id>
 ```
 
-Every command prints one JSON line and uses stable exit codes, so agents can parse the result.
+Every command prints one JSON line and uses stable exit codes, so agents can parse the result. (`tincan hook` is the exception: it prints nothing when there's nothing to tell the agent.)
 
 | Exit | Meaning |
 | --- | --- |

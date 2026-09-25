@@ -64,7 +64,8 @@ pub fn resolve_team(flag: Option<&str>, create: bool) -> Result<(PathBuf, PathBu
                 ),
             ));
         }
-        std::fs::create_dir_all(&tincan_dir)
+        create_private_dir(&tincan_dir)
+            .and_then(|_| std::fs::write(tincan_dir.join(".gitignore"), "*\n"))
             .map_err(|e| TincanError::new(Code::NoTeam, e.to_string()))?;
     }
     let db = tincan_dir.join("tincan.db");
@@ -103,4 +104,13 @@ pub fn connect(db: &Path) -> Result<Connection> {
 
 fn user_version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+}
+
+/// Mail bodies live here: owner-only on Unix, and git-ignored so they never get committed.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(dir)
 }

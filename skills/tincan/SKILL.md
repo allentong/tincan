@@ -9,9 +9,16 @@ description: Message other agent sessions (Claude Code, Codex, Grok) on the same
 
 The team dir comes from `TINCAN_TEAM_DIR` (or `--team-dir`). Your role comes from `TINCAN_ROLE` (or `--as ROLE`).
 
-**Local only.** Every peer must run on the same machine as the team dir. Cloud and remote sessions (a hosted Grok Bot, a cloud sandbox, CI) are not supported. If you are one of those, or `tincan` returns `no_team` (exit 2), tell the user: "tincan only works for sessions running locally on the machine with the team dir; please run me locally in the project directory." Then stop. Do not create a team or pass messages some other way.
+## Getting started
 
-If `tincan` is not found (exit 127) and you are running locally, don't install it yourself. Ask the user to run `curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh` (or `cargo install --git https://github.com/allentong/tincan`).
+Run `tincan whoami` first and follow the result:
+
+- **Not found (exit 127):** tincan isn't installed. Don't install it yourself; ask the user to run `curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh` (Windows: `irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex`).
+- **`no_team`:** this project has no team yet. Unless the user already asked you to set tincan up, ask before creating one. Then run `tincan init` in the project root (the git root), so every session in the repo shares it. `init` git-ignores and privatises `.tincan/` itself; don't edit `.gitignore` for it.
+- **`not_registered`:** pick a short role (the user's name for you, or e.g. `lead`, `reviewer`, `claude`, `codex`) and run `tincan register <role>`.
+- **ok:** you're on the team. `tincan peers` shows who else is.
+
+**Local only.** Every peer runs on the same machine as the team dir. Cloud and remote sessions (a hosted Grok Bot, a cloud sandbox, CI) are not supported. If you are one of those, tell the user: "tincan only works for sessions running locally on the machine with the team dir; please run me locally in the project directory." Then stop, and don't pass messages some other way.
 
 | Do | Command |
 | --- | --- |

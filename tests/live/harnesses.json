@@ -98,10 +98,11 @@
       "openrouter/{model}",
       "{prompt}"
     ],
-    "model": "anthropic/claude-sonnet-5",
+    "model": "qwen/qwen3.8-27b:free",
     "check": [
       "opencode",
       "--version"
-    ]
+    ],
+    "free_only": true
   }
 ]

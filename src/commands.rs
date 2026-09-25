@@ -113,6 +113,20 @@ fn register(
     pid: Option<i64>,
     wake: Option<String>,
 ) -> Result<Option<Value>> {
+    let valid = !role.is_empty()
+        && role.len() <= 64
+        && role
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !valid {
+        return Err(TincanError::new(
+            Code::Usage,
+            format!("invalid role {role:?}: use 1-64 letters, digits, '-', '_' or '.'"),
+        ));
+    }
+    if pid.is_some_and(|p| p < 0) {
+        return Err(TincanError::new(Code::Usage, "--pid must be positive"));
+    }
     let caller = caller.get();
     let wake = wake::resolve(wake.as_deref().unwrap_or("none"))
         .map_err(|m| TincanError::new(Code::Usage, m))?;
@@ -164,12 +178,19 @@ pub fn unregister(
     caller: &LazyCaller,
 ) -> Result<Option<Value>> {
     let me = whoami(conn, as_role, caller)?;
-    conn.execute(
-        "UPDATE peers SET status = 'gone', last_seen = ?2 WHERE role = ?1",
-        params![me.role, now()],
+    // One write transaction, so a session reclaiming the role in between can't lose its new mail.
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    tx.execute(
+        "UPDATE peers SET status = 'gone', last_seen = ?2 WHERE role = ?1 AND pid IS ?3",
+        params![me.role, now(), me.pid],
     )?;
-    let dropped = conn.execute("DELETE FROM deliveries WHERE recipient = ?1", [&me.role])?;
-    wipe_delivered(conn)?;
+    let dropped = if tx.changes() > 0 {
+        tx.execute("DELETE FROM deliveries WHERE recipient = ?1", [&me.role])?
+    } else {
+        0
+    };
+    wipe_delivered(&tx)?;
+    tx.commit()?;
     Ok(Some(
         json!({"ok": true, "role": me.role, "status": "gone", "dropped_pending": dropped}),
     ))
