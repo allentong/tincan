@@ -1272,8 +1272,13 @@ fn unusable_team_dir_points_remote_agents_to_run_locally() {
 // ---- zero-config ----
 
 /// A session as an agent harness would run it: its own owner PID, detected as `harness`.
-fn agent_env<'a>(pid: &'a str, marker: &'a str) -> [(&'a str, &'a str); 2] {
-    [("TINCAN_OWNER_PID", pid), (marker, "1")]
+/// A Claude Code tool shell: owner process, marker env and session id.
+fn agent_env(pid: &str) -> [(&str, &str); 3] {
+    [
+        ("TINCAN_OWNER_PID", pid),
+        ("CLAUDECODE", "1"),
+        ("CLAUDE_CODE_SESSION_ID", pid),
+    ]
 }
 
 #[test]
@@ -1364,17 +1369,17 @@ fn agent_session_auto_registers_as_harness_name() {
     let mut t = Team::new();
     let (a, b) = (t.owner().to_string(), t.owner().to_string());
     // first command from a fresh session registers it and says so
-    let (rc, o) = t.env(&["whoami"], &agent_env(&a, "CLAUDECODE"));
+    let (rc, o) = t.env(&["whoami"], &agent_env(&a));
     assert_eq!((rc, o["role"].as_str()), (0, Some("claude")), "{o}");
     assert!(o["setup"].as_str().unwrap().contains("'claude'"), "{o}");
     // a second live claude session gets the next free name
-    let (_, o) = t.env(&["peers"], &agent_env(&b, "CLAUDECODE"));
+    let (_, o) = t.env(&["peers"], &agent_env(&b));
     assert!(o["setup"].as_str().unwrap().contains("'claude-2'"), "{o}");
     assert_eq!(roles(&o), ["claude", "claude-2"]);
     // and can message the first with no setup at all
-    let (rc, o) = t.env(&["send", "claude", "hi"], &agent_env(&b, "CLAUDECODE"));
+    let (rc, o) = t.env(&["send", "claude", "hi"], &agent_env(&b));
     assert_eq!(rc, 0, "{o}");
-    let (_, o) = t.env(&["inbox"], &agent_env(&a, "CLAUDECODE"));
+    let (_, o) = t.env(&["inbox"], &agent_env(&a));
     assert_eq!(o["messages"][0]["from"], "claude-2");
 }
 
@@ -1382,7 +1387,7 @@ fn agent_session_auto_registers_as_harness_name() {
 fn renaming_an_auto_registered_session_keeps_one_role() {
     let mut t = Team::new();
     let p = t.owner().to_string();
-    let env = agent_env(&p, "CLAUDECODE");
+    let env = agent_env(&p);
     t.env(&["whoami"], &env);
     // re-registering its own name (e.g. to add a wake driver) isn't a conflict
     let (rc, o) = t.env(&["register", "claude", "--wake", "none"], &env);
@@ -1404,10 +1409,27 @@ fn plain_shell_is_not_auto_registered() {
 }
 
 #[test]
+fn shell_under_the_harness_app_is_not_auto_registered() {
+    // e.g. the desktop app's run button: a claude process up the tree, but no session id
+    let mut t = Team::new();
+    let p = t.owner().to_string();
+    let (rc, o) = t.env(
+        &["send", "codex", "ping"],
+        &[("TINCAN_OWNER_PID", &p), ("CLAUDECODE", "1")],
+    );
+    assert_eq!(
+        (rc, o["error"].as_str()),
+        (6, Some("not_registered")),
+        "{o}"
+    );
+    assert_eq!(roles(&t.out(&["peers"])).len(), 0);
+}
+
+#[test]
 fn session_start_hook_registers_and_confirms() {
     let mut t = Team::new();
     let p = t.owner().to_string();
-    let env = agent_env(&p, "CLAUDECODE");
+    let env = agent_env(&p);
     let (rc, o) = t.with(
         &["hook", "--event", "SessionStart"],
         Opts {
