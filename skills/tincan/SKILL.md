@@ -54,3 +54,4 @@ Rules:
 - Answer with `--reply-to`. Send acknowledgements and "done" notices with `--no-reply`. Never reply to a message whose `no_reply` is true.
 - Keep bodies under 8 KiB. For more, write a file and send its path and sha256.
 - Exit 3 (`peer_unavailable`) means the peer is gone and no quick session could start (or you passed `--no-launch`): tell the user, don't retry in a loop. Exit 7 or 8 means stop the thread.
+- A started session listed under `ended` in `tincan wait --replies-to` quit without answering, usually because its CLI isn't logged in. Show the user the tail of `launched.log` and ask them to log in (`claude` then `/login`, or `codex login`); don't retry until they have.

@@ -553,6 +553,16 @@ fn launch_agent(
         .env("TINCAN_LEAD", if stay { sender } else { "" })
         .env_remove("TINCAN_SESSION")
         .env_remove("TINCAN_OWNER_PID");
+    // Run the CLI on its own login (the user's subscription), never on an API key that happens
+    // to be in the sender's env. No login means the CLI fails, and its log says so.
+    for k in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+    ] {
+        cmd.env_remove(k);
+    }
     // A fresh session, not a nested one: harnesses refuse to start inside their own session env.
     for h in harness::load() {
         for v in h.session_env.iter().chain(&h.marker_env) {
