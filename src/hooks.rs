@@ -3,7 +3,7 @@
 //!
 //! - SessionStart / UserPromptSubmit: add "N unread" to the model's context.
 //! - PostToolUse: same, mid-turn, but only once per new message.
-//! - Stop / SubagentStop: block the stop once per new message so the agent reads it;
+//! - Stop (and SubagentStop, if a harness is set up to send it): block the stop once per new message so the agent reads it;
 //!   with `--linger S`, first wait up to S seconds for replies to its own open requests.
 //! - SessionEnd: release the role.
 

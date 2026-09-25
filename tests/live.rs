@@ -6,7 +6,7 @@
 //!
 //!   cargo test --release --test live -- --ignored --nocapture                # every available harness
 //!   TINCAN_LIVE=codex,claude cargo test --release --test live -- --ignored   # just these
-//!   TINCAN_LIVE_MODEL=openai/gpt-5 TINCAN_LIVE=opencode-openrouter cargo test --test live -- --ignored
+//!   TINCAN_LIVE_MODEL=google/gemma-4-31b-it:free TINCAN_LIVE=opencode-openrouter cargo test --test live -- --ignored
 //!   cargo test --release --test live broadcast -- --ignored --nocapture     # one question to all at once
 
 use serde_json::Value;
@@ -66,6 +66,18 @@ fn on_path(bin: &str) -> bool {
 }
 
 fn skip_reason(h: &Value) -> Option<String> {
+    // Entries marked free_only run only on `:free` models unless paid runs are explicitly allowed.
+    if h["free_only"] == true && std::env::var_os("TINCAN_LIVE_ALLOW_PAID").is_none() {
+        let model = std::env::var("TINCAN_LIVE_MODEL")
+            .ok()
+            .or_else(|| h["model"].as_str().map(str::to_string))
+            .unwrap_or_default();
+        if !model.ends_with(":free") {
+            return Some(format!(
+                "{model} is not a :free model (set TINCAN_LIVE_ALLOW_PAID=1)"
+            ));
+        }
+    }
     let bin = h["bin"].as_str().unwrap();
     if !on_path(bin) {
         return Some(format!("{bin} not on PATH"));
@@ -149,6 +161,13 @@ fn turn(h: &Value, team: &Path, role: &str, timeout: f64) -> Option<String> {
         .env("TINCAN_TEAM_DIR", team)
         .env("TINCAN_ROLE", role)
         .env("PATH", path_env())
+        // Keep harnesses on their subscription logins: a stray API key would switch them to per-token billing.
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("CODEX_API_KEY")
+        .env_remove("XAI_API_KEY")
+        .env_remove("GROK_CODE_XAI_API_KEY")
         // Harnesses that don't read the prompt from stdin get /dev/null: `codex exec` hangs on an open stdin.
         .stdin(if feed_prompt {
             Stdio::piped()

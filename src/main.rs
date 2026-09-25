@@ -85,7 +85,7 @@ pub enum Cmd {
     Ack { ids: Vec<String> },
     /// Block until a message is available or the timeout passes
     Wait {
-        #[arg(long, default_value_t = 300.0)]
+        #[arg(long, default_value_t = 300.0, value_parser = seconds)]
         timeout: f64,
         /// Wait until every recipient of this message has replied (fan-out gather)
         #[arg(long)]
@@ -96,7 +96,7 @@ pub enum Cmd {
         #[arg(long, default_value = "UserPromptSubmit")]
         event: String,
         /// Stop only: wait up to this many seconds for replies to this session's open requests
-        #[arg(long, default_value_t = 0.0)]
+        #[arg(long, default_value_t = 0.0, value_parser = seconds)]
         linger: f64,
     },
     /// List loaded harness profiles and wake drivers, with any config errors
@@ -134,4 +134,12 @@ fn main() {
 fn fail(e: TincanError) -> ! {
     println!("{}", e.to_json());
     std::process::exit(e.code.exit());
+}
+
+/// Durations must be finite and non-negative: a NaN deadline would never pass.
+fn seconds(s: &str) -> std::result::Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => Ok(v),
+        _ => Err(format!("{s:?} is not a non-negative number of seconds")),
+    }
 }

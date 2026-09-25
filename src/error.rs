@@ -2,9 +2,9 @@ use serde_json::{Map, Value, json};
 
 /// Attached to every no_team error: the likeliest cause for an agent is running somewhere
 /// other than the machine that holds the team dir (a cloud sandbox, a remote container).
-const LOCAL_ONLY_HINT: &str = "tincan is local-only: every peer runs on the same machine against the same team dir. \
-If you are a cloud or remote agent, stop and ask the user to run this session locally in the project directory. \
-Do not install tincan or create a team here to work around it.";
+const LOCAL_ONLY_HINT: &str = "No team here yet. If you are running locally, run `tincan init` in the project root \
+(ask the user first unless they asked you to set tincan up), then `tincan register <role>`. \
+tincan is local-only: if you are a cloud or remote agent, ask the user to run this session locally instead.";
 use std::fmt;
 
 /// Every failure maps to one stable exit code and one machine-readable `error` string.
