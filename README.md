@@ -2,7 +2,7 @@
 
 # tincan
 
-Let your coding agents talk to each other. `tincan` is a small local CLI that lets Claude Code, Codex, Grok and other agent sessions on the same machine send each other messages, so you stop being the copy-paste bus between terminals.
+Let your coding agents talk to each other. `tincan` is a small local CLI that lets Claude Code, Codex, opencode and other agent sessions on the same machine send each other messages, so you stop being the copy-paste bus between terminals.
 
 - **One binary, no daemon, no network.** A team is one SQLite file in `<project>/.tincan/`.
 - **Fast.** About 9 ms per command.
@@ -14,12 +14,44 @@ Let your coding agents talk to each other. `tincan` is a small local CLI that le
 ## Install
 
 ```sh
+# macOS, Linux
 curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh
-# or build from source
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex
+# any platform, from source
 cargo install --git https://github.com/allentong/tincan
 ```
 
-The script installs the release binary for macOS or Linux (arm64, x86_64) into `~/.local/bin`.
+The scripts install the release binary for your OS and CPU (arm64 or x86_64): `~/.local/bin` on macOS and Linux, `%LOCALAPPDATA%\tincan\bin` on Windows.
+
+## Supported
+
+What's been run end to end, and on what. Anything not listed here is untested.
+
+**Harnesses.** Each one received a message, read it and replied (round trip), and answered a broadcast in parallel with the others. Tested with `cargo test --test live` on macOS.
+
+| Harness | Version | Model | Tested |
+| --- | --- | --- | --- |
+| Claude Code | 2.1.282 | claude-opus-5-5 | Round trip, broadcast; interactive session with hooks |
+| Claude Code | 2.1.282 | claude-haiku-4-5 | Round trip, broadcast |
+| Codex CLI | 0.155.1 | gpt-5.6-sol | Round trip, broadcast; interactive TUI woken by the cmux driver |
+| opencode | 1.18.30 | opencode/big-pickle | Round trip, broadcast |
+
+Not yet tested: the Grok CLI (`grok`) and tmux wake, both built in, and opencode with OpenRouter models (listed in `tests/live/harnesses.json`, needs `OPENROUTER_API_KEY`). Any other harness works with `--as ROLE` or `TINCAN_ROLE`.
+
+Cloud-hosted agents (Grok Bot, cloud sandboxes, CI) aren't supported: the skill tells them to ask you to run the session locally.
+
+**Terminal wake.** cmux and herdr were tested with real sessions. The `cmd:` driver is covered by the test suite.
+
+**Platforms.**
+
+| OS | Tested |
+| --- | --- |
+| macOS (arm64) | Everything above |
+| Linux (x86_64) | Build and the full CLI test suite in CI |
+| Windows (x86_64) | Build and the full CLI test suite in CI |
+
+Live harness runs have only been done on macOS. On Windows, the Claude Code plugin's hooks need Claude Code to run hooks through Git Bash; that hasn't been checked.
 
 ## Quick start
 
