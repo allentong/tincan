@@ -459,7 +459,8 @@ fn reply_loop_capped() {
 fn identity_inferred_from_session_env() {
     let mut t = Team::new();
     let p = t.owner();
-    let env = [("CLAUDE_CODE_SESSION_ID", "sess-1")];
+    // CLAUDECODE marks the harness when no claude process is an ancestor (CI).
+    let env = [("CLAUDE_CODE_SESSION_ID", "sess-1"), ("CLAUDECODE", "1")];
     t.env(&["register", "claude", "--pid", &p.to_string()], &env);
     let (rc, o) = t.env(&["whoami"], &env);
     assert_eq!((rc, o["role"].as_str()), (0, Some("claude")));
