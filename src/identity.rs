@@ -45,9 +45,12 @@ impl LazyCaller {
 impl Caller {
     pub fn detect() -> Self {
         let (owner_pid, harness) = find_harness(&harness::load());
+        // TINCAN_OWNER_PID=0 opts out of detection entirely (a plain shell inside an agent session).
+        let plain = std::env::var("TINCAN_OWNER_PID").is_ok_and(|p| p == "0");
         let session_key = std::env::var("TINCAN_SESSION").ok().or_else(|| {
             harness
                 .as_ref()
+                .filter(|_| !plain)
                 .and_then(|h| h.session_env.iter().find_map(|v| std::env::var(v).ok()))
         });
         Caller {
@@ -68,11 +71,12 @@ fn find_harness(profiles: &[Profile]) -> (Option<i64>, Option<Profile>) {
             .cloned()
     };
     // An explicit owner (wrappers, tests) skips the walk; the harness then comes from env markers.
+    // `0` means "no owner": treat the caller as a plain shell.
     if let Some(pid) = std::env::var("TINCAN_OWNER_PID")
         .ok()
         .and_then(|p| p.parse().ok())
     {
-        return (Some(pid), marked());
+        return ((pid > 0).then_some(pid), marked());
     }
     let mut pid = parent_pid();
     for _ in 0..20 {
@@ -384,6 +388,82 @@ pub fn touch(conn: &Connection, role: &str) -> Result<()> {
         params![now(), role],
     )?;
     Ok(())
+}
+
+/// Role names: 1-64 of `[A-Za-z0-9._-]`, so they're safe in messages, shells and `*` broadcasts.
+pub fn valid_role(role: &str) -> bool {
+    !role.is_empty()
+        && role.len() <= 64
+        && role
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// `whoami`, registering the caller first if it's an agent session that hasn't joined yet:
+/// as its `--as`/TINCAN_ROLE if given, else as its harness name (`claude`, then `claude-2`, ...).
+pub fn me(conn: &Connection, as_role: Option<&str>, caller: &LazyCaller) -> Result<Peer> {
+    match whoami(conn, as_role, caller) {
+        Err(e) if e.code == Code::NotRegistered => auto_register(conn, as_role, caller)?.ok_or(e),
+        r => r,
+    }
+}
+
+fn auto_register(
+    conn: &Connection,
+    as_role: Option<&str>,
+    caller: &LazyCaller,
+) -> Result<Option<Peer>> {
+    let explicit = as_role
+        .map(str::to_string)
+        .or_else(|| std::env::var("TINCAN_ROLE").ok());
+    if explicit.as_deref().is_some_and(|r| !valid_role(r)) {
+        return Ok(None);
+    }
+    let c = caller.get();
+    // A plain shell or script isn't a session: it must register explicitly.
+    if c.owner_pid.is_none() && c.session_key.is_none() {
+        return Ok(None);
+    }
+    let harness = c.harness.as_ref().map_or("agent", |h| h.name.as_str());
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let free = |role: &str| -> Result<bool> {
+        Ok(get_peer(&tx, role)?.is_none_or(|p| p.state() != PeerState::Active))
+    };
+    let role = match explicit {
+        Some(r) if free(&r)? => r,
+        Some(_) => return Ok(None),
+        None => {
+            let mut found = None;
+            for n in 1..=99 {
+                let r = if n == 1 {
+                    harness.to_string()
+                } else {
+                    format!("{harness}-{n}")
+                };
+                if free(&r)? {
+                    found = Some(r);
+                    break;
+                }
+            }
+            let Some(r) = found else { return Ok(None) };
+            r
+        }
+    };
+    // Mail belongs to a session, not a role: taking over a stale role starts empty.
+    tx.execute("DELETE FROM deliveries WHERE recipient = ?1", [&role])?;
+    let t = now();
+    tx.execute(
+        "INSERT INTO peers(role, harness, session_key, pid, registered_at, last_seen, status, wake)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'active', NULL)
+         ON CONFLICT(role) DO UPDATE SET harness = excluded.harness, session_key = excluded.session_key,
+           pid = excluded.pid, registered_at = excluded.registered_at, last_seen = excluded.last_seen,
+           status = 'active', wake = NULL, told_seq = 0",
+        params![role, harness, c.session_key, c.owner_pid, t],
+    )?;
+    let peer = get_peer(&tx, &role)?;
+    tx.commit()?;
+    crate::store::note(format!("Registered this session as '{role}'."));
+    Ok(peer)
 }
 
 #[cfg(test)]

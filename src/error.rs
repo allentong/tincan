@@ -1,9 +1,9 @@
 use serde_json::{Map, Value, json};
 
-/// Attached to every no_team error: the likeliest cause for an agent is running somewhere
-/// other than the machine that holds the team dir (a cloud sandbox, a remote container).
-const LOCAL_ONLY_HINT: &str = "No team here yet. If you are running locally, run `tincan init` in the project root \
-(ask the user first unless they asked you to set tincan up), then `tincan register <role>`. \
+/// Attached to every no_team error. Teams are created on demand, so this means an unusable path,
+/// or an agent running somewhere other than the machine that holds the team dir.
+const LOCAL_ONLY_HINT: &str = "tincan could not open or create its team dir (normally the git repo root). \
+Check the path is writable, or pass --team-dir. \
 tincan is local-only: if you are a cloud or remote agent, ask the user to run this session locally instead.";
 use std::fmt;
 

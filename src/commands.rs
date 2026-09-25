@@ -1,5 +1,7 @@
 use crate::error::{Code, Result, TincanError};
-use crate::identity::{self, LazyCaller, PEER_COLS, Peer, PeerState, peer_from_row, touch, whoami};
+use crate::identity::{
+    self, LazyCaller, PEER_COLS, Peer, PeerState, me, peer_from_row, touch, whoami,
+};
 use crate::store::{connect, now, resolve_team};
 use crate::{Cli, Cmd, harness, hooks, wake};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
@@ -57,7 +59,11 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                 } => register(&mut conn, &caller, role, harness, pid, wake),
                 Cmd::Unregister => unregister(&conn, as_role, &caller),
                 Cmd::Whoami => whoami_cmd(&conn, as_role, &caller),
-                Cmd::Peers { all } => peers(&conn, all),
+                Cmd::Peers { all } => {
+                    // Listing peers joins the team too, so a fresh session shows up for others.
+                    let _ = me(&conn, as_role, &caller);
+                    peers(&conn, all)
+                }
                 Cmd::Send {
                     to,
                     body,
@@ -113,12 +119,7 @@ fn register(
     pid: Option<i64>,
     wake: Option<String>,
 ) -> Result<Option<Value>> {
-    let valid = !role.is_empty()
-        && role.len() <= 64
-        && role
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    if !valid {
+    if !identity::valid_role(&role) {
         return Err(TincanError::new(
             Code::Usage,
             format!("invalid role {role:?}: use 1-64 letters, digits, '-', '_' or '.'"),
@@ -143,7 +144,8 @@ fn register(
     let existing = identity::get_peer(&tx, &role)?;
     let mut dropped = 0;
     if let Some(p) = &existing {
-        let same_session = p.session_key.is_some() && p.session_key == caller.session_key;
+        let same_session = (p.session_key.is_some() && p.session_key == caller.session_key)
+            || (p.pid.is_some() && p.pid == pid);
         if p.state() == PeerState::Active && !same_session {
             return Err(TincanError::new(
                 Code::RoleTaken,
@@ -164,6 +166,12 @@ fn register(
            pid = excluded.pid, registered_at = excluded.registered_at, last_seen = excluded.last_seen,
            status = 'active', wake = excluded.wake",
         params![role, harness, caller.session_key, pid, t, wake],
+    )?;
+    // One role per session: taking a new name (say, after auto-registration) releases the old one.
+    tx.execute(
+        "UPDATE peers SET status = 'gone' WHERE role != ?1 AND status = 'active'
+           AND ((session_key IS NOT NULL AND session_key IS ?2) OR (pid IS NOT NULL AND pid IS ?3))",
+        params![role, caller.session_key, pid],
     )?;
     tx.commit()?;
     Ok(Some(
@@ -216,7 +224,7 @@ fn whoami_cmd(
     as_role: Option<&str>,
     caller: &LazyCaller,
 ) -> Result<Option<Value>> {
-    let me = whoami(conn, as_role, caller)?;
+    let me = me(conn, as_role, caller)?;
     touch(conn, &me.role)?;
     let unread = unread_count(conn, &me.role, false)?;
     Ok(Some(
@@ -280,7 +288,7 @@ fn send(
             ),
         ));
     }
-    let me = whoami(conn, as_role, caller)?;
+    let me = me(conn, as_role, caller)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     touch(&tx, &me.role)?;
     sweep(&tx)?;
@@ -483,7 +491,7 @@ fn inbox(
     count: bool,
     require_ack: bool,
 ) -> Result<Option<Value>> {
-    let me = whoami(conn, as_role, caller)?;
+    let me = me(conn, as_role, caller)?;
     touch(conn, &me.role)?;
     if count {
         let unread = unread_count(conn, &me.role, false)?;
@@ -556,7 +564,7 @@ fn ack(
     caller: &LazyCaller,
     ids: &[String],
 ) -> Result<Option<Value>> {
-    let me = whoami(conn, as_role, caller)?;
+    let me = me(conn, as_role, caller)?;
     touch(conn, &me.role)?;
     let mut acked = 0;
     for id in ids {
@@ -575,7 +583,7 @@ fn wait(
     caller: &LazyCaller,
     timeout: f64,
 ) -> Result<Option<Value>> {
-    let me = whoami(conn, as_role, caller)?;
+    let me = me(conn, as_role, caller)?;
     let deadline = now() + timeout;
     loop {
         let n = unread_count(conn, &me.role, true)?;
@@ -598,7 +606,7 @@ fn wait_replies(
     id: &str,
     timeout: f64,
 ) -> Result<Option<Value>> {
-    let me = whoami(conn, as_role, caller)?;
+    let me = me(conn, as_role, caller)?;
     let (sender, recipients): (String, String) = conn
         .query_row(
             "SELECT sender, recipients FROM messages WHERE id = ?1",
