@@ -361,7 +361,11 @@ fn ac4_concurrent_sends_consistent() {
             .collect()
     });
     let failed: Vec<_> = results.iter().filter(|(rc, _)| *rc != 0).collect();
-    assert!(failed.is_empty(), "{} of {N} sends failed: {failed:?}", failed.len());
+    assert!(
+        failed.is_empty(),
+        "{} of {N} sends failed: {failed:?}",
+        failed.len()
+    );
     // pending mail survives the senders exiting; each side gets exactly its half, no dupes
     t.kill_all();
     let g = t.out(&["--as", "grok", "inbox"]);
