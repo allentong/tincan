@@ -1,0 +1,59 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v tincan >/dev/null 2>&1 && tincan hook --event SessionStart || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v tincan >/dev/null 2>&1 && tincan hook --event UserPromptSubmit || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v tincan >/dev/null 2>&1 && tincan hook --event PostToolUse || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v tincan >/dev/null 2>&1 && tincan hook --event Stop --linger 120 || true",
+            "timeout": 150
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v tincan >/dev/null 2>&1 && tincan hook --event SessionEnd || true",
+            "timeout": 1
+          }
+        ]
+      }
+    ]
+  }
+}

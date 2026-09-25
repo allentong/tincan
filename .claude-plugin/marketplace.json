@@ -1,0 +1,19 @@
+{
+  "name": "tincan",
+  "owner": {
+    "name": "allentong"
+  },
+  "metadata": {
+    "description": "Local message bus between coding agent sessions",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "tincan",
+      "source": "./",
+      "description": "Message other local agent sessions (Claude Code, Codex, Grok): the tincan skill plus hooks that surface new mail.",
+      "category": "productivity",
+      "tags": ["agents", "messaging", "codex", "grok", "multi-agent"]
+    }
+  ]
+}

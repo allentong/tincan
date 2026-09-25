@@ -1,5 +1,5 @@
 //! Harness hooks: terminal-free delivery for any harness with Claude-Code-style command hooks
-//! (Claude Code and Codex share the stdin/stdout contract).
+//! (Claude Code, Codex and Grok share the stdin/stdout contract).
 //!
 //! - SessionStart / UserPromptSubmit: add "N unread" to the model's context.
 //! - PostToolUse: same, mid-turn, but only once per new message.

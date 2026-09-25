@@ -64,6 +64,25 @@
     ]
   },
   {
+    "name": "opencode-zen",
+    "profile": "opencode",
+    "bin": "opencode",
+    "cmd": [
+      "opencode",
+      "run",
+      "--dir",
+      "{team}",
+      "-m",
+      "opencode/{model}",
+      "{prompt}"
+    ],
+    "model": "big-pickle",
+    "check": [
+      "opencode",
+      "--version"
+    ]
+  },
+  {
     "name": "opencode-openrouter",
     "profile": "opencode",
     "bin": "opencode",

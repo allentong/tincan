@@ -46,9 +46,9 @@ pub fn builtins() -> Vec<Profile> {
             name: "grok".into(),
             process_names: strs(&["grok"]),
             session_env: strs(&["GROK_SESSION_ID"]),
-            marker_env: vec![],
+            marker_env: strs(&["GROK_SESSION_ID"]),
             busy_text: None,
-            hooks_file: None,
+            hooks_file: Some(".grok/hooks/tincan.json".into()),
         },
     ]
 }
@@ -65,6 +65,19 @@ pub fn load() -> Vec<Profile> {
     out
 }
 
+/// `~/.config/tincan/<name>` on every OS; home is HOME, else USERPROFILE (Windows).
+pub fn config_file(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| {
+            std::path::Path::new(&h)
+                .join(".config")
+                .join("tincan")
+                .join(name)
+        })
+}
+
 pub fn find(name: &str) -> Option<Profile> {
     load().into_iter().find(|p| p.name == name)
 }
@@ -72,10 +85,7 @@ pub fn find(name: &str) -> Option<Profile> {
 fn user_profiles() -> Vec<Profile> {
     let path = std::env::var_os("TINCAN_HARNESSES")
         .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| std::path::Path::new(&h).join(".config/tincan/harnesses.json"))
-        });
+        .or_else(|| config_file("harnesses.json"));
     let Some(text) = path.and_then(|p| std::fs::read_to_string(p).ok()) else {
         return vec![];
     };
