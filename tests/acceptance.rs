@@ -1660,7 +1660,9 @@ fn mail_to_a_missing_harness_starts_a_quick_session_that_answers() {
         ],
         &env,
     );
-    assert_eq!(strs(&w["replied"]), ["fake"], "{w}");
+    // on failure, show what the started session printed
+    let log = std::fs::read_to_string(o["launched"]["log"].as_str().unwrap()).unwrap_or_default();
+    assert_eq!(strs(&w["replied"]), ["fake"], "{w}\nlaunch log:\n{log}");
     let inbox = t.out(&["--as", "lead", "inbox"]);
     assert_eq!(bodies(&inbox), ["pong from fake"]);
     assert_eq!(msgs(&inbox)[0]["reply_to"], mid.as_str());
