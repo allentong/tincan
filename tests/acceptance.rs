@@ -471,8 +471,8 @@ fn ac4_concurrent_sends_consistent() {
     );
     // pending mail survives the senders exiting; each side gets exactly its half, no dupes
     t.kill_all();
-    let g = t.out(&["--as", "grok", "inbox"]);
-    let c = t.out(&["--as", "claude", "inbox"]);
+    let g = t.out(&["--as", "grok", "inbox", "--limit", "100"]);
+    let c = t.out(&["--as", "claude", "inbox", "--limit", "100"]);
     assert_eq!((msgs(&g).len(), msgs(&c).len()), (N / 2, N / 2));
     let mut all: Vec<&str> = ids(&g).into_iter().chain(ids(&c)).collect();
     all.sort();
@@ -551,6 +551,44 @@ fn large_payload_rejected() {
         },
     );
     assert_eq!((rc, o["error"].as_str()), (4, Some("too_large")));
+}
+
+#[test]
+fn inbox_is_paginated_and_reports_remaining_mail() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    for body in ["one", "two", "three"] {
+        assert_eq!(t.run(&["--as", "a", "send", "b", body]).0, 0);
+    }
+    let first = t.out(&["--as", "b", "inbox", "--limit", "2"]);
+    assert_eq!(bodies(&first), ["one", "two"]);
+    assert_eq!(first["remaining"], 1);
+    assert_eq!(first["has_more"], true);
+    let second = t.out(&["--as", "b", "inbox", "--limit", "2"]);
+    assert_eq!(bodies(&second), ["three"]);
+    assert_eq!(second["remaining"], 0);
+    assert_eq!(second["has_more"], false);
+}
+
+#[test]
+fn full_mailbox_rejects_more_pending_messages() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    t.db()
+        .execute_batch(
+            "WITH RECURSIVE seq(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM seq WHERE x < 512)
+             INSERT INTO messages(id, sender, kind, body, created_at, recipients)
+             SELECT printf('quota-%04d', x), 'a', 'dm', 'x', x, '[\"b\"]' FROM seq;
+             INSERT INTO deliveries(message_id, recipient)
+             SELECT id, 'b' FROM messages WHERE id LIKE 'quota-%';",
+        )
+        .unwrap();
+    let (rc, o) = t.run(&["--as", "a", "send", "b", "one too many"]);
+    assert_eq!((rc, o["error"].as_str()), (9, Some("mailbox_full")), "{o}");
+    assert_eq!(o["recipient"], "b");
+    assert_eq!(o["pending"], 512);
 }
 
 #[test]
@@ -1017,6 +1055,13 @@ fn hooks_config_per_harness() {
     let (_, o) = exec(None, &["hooks", "--harness", "codex"], Opts::default());
     assert_eq!(o["file"], ".codex/hooks.json");
     assert!(o["config"]["hooks"].get("Stop").is_some());
+    let command = o["config"]["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        command.starts_with("PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\""),
+        "{command}"
+    );
     let (_, o) = exec(None, &["hooks", "--harness", "grok"], Opts::default());
     assert_eq!(o["file"], ".grok/hooks/tincan.json");
     // A harness without command hooks is told to use a wake driver or `wait` instead.

@@ -107,6 +107,8 @@ Optional: `tincan register reviewer` for a custom name, `--as ROLE` / `TINCAN_RO
 
 Every command prints one JSON line and uses stable exit codes, so agents can parse the result. (`tincan hook` is the exception: it prints nothing when there's nothing to tell the agent.)
 
+`inbox` returns at most 25 messages by default (up to 100 with `--limit`) and includes `has_more` and `remaining`; call it again while `has_more` is true. Mailboxes and senders also have pending-delivery quotas so a peer cannot grow the local store without bound.
+
 | Exit | Meaning |
 | --- | --- |
 | 0 | ok |
@@ -196,6 +198,8 @@ Without a profile, any harness can still use `--as ROLE` or `TINCAN_ROLE`.
 tincan is local-only: every peer runs on the same machine against the same team dir. Cloud-hosted agents aren't supported; the skill tells them to ask the user to run the session locally.
 
 Message bodies come from other agents. The skill tells agents to treat them as a peer's request, not the user's instruction, and never to take destructive or credentialed actions because a message asked.
+
+Roles are routing labels, not authenticated identities. Every process with access to the owner-only team store is trusted with every mailbox, so messages must not contain secrets from another local process or agent. Headless stdout/stderr logs persist in `.tincan/launch-<role>.log` until replaced or manually removed. See [SECURITY.md](SECURITY.md) for the full trust model and private reporting instructions.
 
 ## Development
 

@@ -98,6 +98,9 @@ pub enum Cmd {
         /// Lease messages and leave them unread until `tincan ack`
         #[arg(long)]
         require_ack: bool,
+        /// Maximum messages returned in one call
+        #[arg(long, default_value_t = 25, value_parser = inbox_limit)]
+        limit: usize,
     },
     /// Mark leased messages read
     Ack { ids: Vec<String> },
@@ -166,5 +169,12 @@ fn seconds(s: &str) -> std::result::Result<f64, String> {
     match s.parse::<f64>() {
         Ok(v) if v.is_finite() && v >= 0.0 => Ok(v),
         _ => Err(format!("{s:?} is not a non-negative number of seconds")),
+    }
+}
+
+fn inbox_limit(s: &str) -> std::result::Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(value @ 1..=100) => Ok(value),
+        _ => Err(format!("{s:?} is not an integer from 1 through 100")),
     }
 }
