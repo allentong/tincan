@@ -123,6 +123,11 @@ Every command prints one JSON line and uses stable exit codes, so agents can par
 
 `tincan install-skills` (run by the install steps above) puts the skill in `~/.claude/skills` for Claude Code and `~/.agents/skills` for Codex and Grok. With the Claude Code plugin installed, Claude uses the plugin's copy instead.
 
+**Recipes.** Two more skills ship with it (in Claude Code with the plugin, `/tincan:consult` and `/tincan:delegate`; elsewhere `tincan-consult` and `tincan-delegate`):
+
+- **consult:** get a second opinion from another agent on a question, or have it challenge your current changes (a ship/don't-ship verdict with file:line findings). You get its answer plus your agent's own take.
+- **delegate:** hand a task to another agent and direct it until it's done. It works in your checkout (including a worktree), asks you questions over tincan, and reports back; your agent checks the result and tells it when it's finished. For example, from Codex: "delegate this refactor to Claude".
+
 **Optional, Claude Code plugin:** adds hooks that tell a session when mail arrives, without it having to check. It carries its own copy of the skill.
 
 ```
@@ -186,7 +191,7 @@ Check what's loaded with `tincan extensions`. Bad config is reported there; the 
 ]
 ```
 
-`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}`, `{role}`, `{sender}`, `{message_id}`.
+`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}`, `{cwd}` (the sender's working directory, where the session runs), `{role}`, `{sender}`, `{message_id}`.
 
 Without a profile, any harness can still use `--as ROLE` or `TINCAN_ROLE`.
 
