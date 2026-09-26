@@ -1,6 +1,6 @@
 ---
 name: consult
-description: Get a second opinion from another agent (Claude Code, Codex, Grok) through tincan, on a question or on the current changes. Use when the user asks to consult, ask, or get a review from another agent, or on your own when you're stuck or unsure (see "When to consult on your own").
+description: Get a read-only second opinion from another agent (Claude Code, Codex, Grok) through tincan, on a question or a review of the current changes; it never edits anything. Use when the user asks to consult, ask, or get a review from another agent, or on your own when you're stuck or unsure (see "When to consult on your own").
 ---
 
 # Consult another agent
@@ -54,13 +54,17 @@ say so and list nothing.
 ## 4. Send and wait
 
 ```sh
-tincan send <agent> "<message>"
+tincan send <agent> - <<'EOF'
+<message>
+EOF
 tincan wait --replies-to <id> --timeout 600
 ```
 
 Give your shell tool a timeout of at least 660 seconds. A quick Claude session usually answers in about 10 s, Codex in about 20 s, longer for a real review. Then read the answer with `tincan inbox`.
 
 If `wait` lists the agent under `ended`, it quit without answering, usually because that CLI isn't logged in. Show the user the last lines of the `log` path from the send's `launched` field and ask them to log in (`claude` then `/login`, or `codex login`). If it times out, tell the user; don't resend in a loop.
+
+For a high-stakes call, or when the user asks for several opinions, send the same message to two agents (for example `codex` and `grok`) and wait for each; then report where they agree and where they split.
 
 ## 5. Report
 

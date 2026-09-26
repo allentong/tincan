@@ -1545,6 +1545,18 @@ fn install_skills_puts_the_skill_where_harnesses_look() {
 }
 
 #[test]
+fn empty_body_is_rejected() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    for body in ["", "  \n"] {
+        let (rc, o) = t.run(&["--as", "a", "send", "b", body]);
+        assert_eq!(rc, 2, "{o}");
+    }
+    assert!(msgs(&t.out(&["--as", "b", "inbox"])).is_empty());
+}
+
+#[test]
 fn message_ids_are_uuid_v7() {
     let mut t = Team::new();
     t.reg("a", "claude");

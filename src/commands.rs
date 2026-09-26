@@ -293,6 +293,13 @@ fn send(
     } else {
         o.body
     };
+    // An empty body is always a mistake, usually an unset shell variable: fail so it's resent.
+    if body.trim().is_empty() {
+        return Err(TincanError::new(
+            Code::Usage,
+            "body is empty (if you built it in a shell variable, it wasn't set); nothing was sent",
+        ));
+    }
     if body.len() > MAX_BODY {
         return Err(TincanError::new(
             Code::TooLarge,
