@@ -10,7 +10,7 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS peers(
   role TEXT PRIMARY KEY, harness TEXT NOT NULL, session_key TEXT, pid INTEGER,
   registered_at REAL NOT NULL, last_seen REAL NOT NULL, status TEXT NOT NULL DEFAULT 'active',
-  wake TEXT);
+  wake TEXT, workspace TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS messages(
   id TEXT PRIMARY KEY,
   sender TEXT NOT NULL, client_id TEXT, kind TEXT NOT NULL, body TEXT NOT NULL,
@@ -89,6 +89,31 @@ pub fn resolve_team(flag: Option<&str>, init: bool) -> Result<(PathBuf, PathBuf)
     Ok((dir, db))
 }
 
+/// The checkout/project a peer is actually working in, separate from the shared team store.
+/// Worktrees share one team database but keep their own workspace; outside git, use the cwd.
+pub fn resolve_workspace() -> Result<PathBuf> {
+    let explicit = std::env::var_os("TINCAN_WORKSPACE_DIR").filter(|p| !p.is_empty());
+    let cwd =
+        match explicit {
+            Some(path) => std::path::absolute(path)
+                .map_err(|e| TincanError::new(Code::NoTeam, e.to_string()))?,
+            None => std::env::current_dir()
+                .map_err(|e| TincanError::new(Code::NoTeam, e.to_string()))?,
+        };
+    let workspace = cwd
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .unwrap_or(&cwd)
+        .to_path_buf();
+    if !workspace.is_dir() {
+        return Err(TincanError::new(
+            Code::NoTeam,
+            format!("workspace {} is not a directory", workspace.display()),
+        ));
+    }
+    Ok(workspace)
+}
+
 fn find_upwards(start: &Path) -> Result<Option<PathBuf>> {
     for dir in start.ancestors() {
         let candidate = dir.join(".tincan");
@@ -157,8 +182,15 @@ pub fn take_notes() -> Option<String> {
     (!notes.is_empty()).then(|| notes.join(" "))
 }
 
+pub fn attach_notes(mut value: serde_json::Value) -> serde_json::Value {
+    if let (Some(object), Some(setup)) = (value.as_object_mut(), take_notes()) {
+        object.insert("setup".into(), setup.into());
+    }
+    value
+}
+
 /// Bump when SCHEMA changes. The store only holds in-flight mail, so an old one is rebuilt, not migrated.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 pub fn connect(db: &Path) -> Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE

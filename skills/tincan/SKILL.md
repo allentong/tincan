@@ -17,7 +17,7 @@ Run `tincan peers` first and follow the result:
   - macOS / Linux: `curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh` (installs to `~/.local/bin`)
   - Windows: `irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex`
 - **Output has a `setup` field:** tincan just created the team or registered you. Tell the user in one line what it says (e.g. "tincan: created team at /repo/.tincan, registered this session as 'claude'").
-- **ok:** you're on the team; `peers` lists who else is. Message one with `tincan send <role> "<text>"`.
+- **ok:** inspect `registered` and `self` to confirm whether this session joined; `peers` lists each peer and its workspace. Message one with `tincan send <role> "<text>"`.
 - **The agent you want isn't listed:** send to its harness name anyway (`claude`, `codex`, `grok`). tincan starts a quick headless session that answers and exits; the result has a `launched` field. Then run `tincan wait --replies-to <id> --timeout 300` and read the answer with `tincan inbox`.
 - **`not_registered`:** tincan couldn't tell this is an agent session (e.g. a sandbox hid the process tree). Run `tincan register <name>` with your harness name.
 

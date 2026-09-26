@@ -584,13 +584,14 @@ fn reply_loop_capped() {
 fn identity_inferred_from_session_env() {
     let mut t = Team::new();
     let p = t.owner();
+    let p = p.to_string();
     // CLAUDECODE marks the harness when no claude process is an ancestor (CI).
     let env = [
         ("CLAUDE_CODE_SESSION_ID", "sess-1"),
         ("CLAUDECODE", "1"),
-        ("TINCAN_OWNER_PID", ""),
+        ("TINCAN_OWNER_PID", p.as_str()),
     ];
-    t.env(&["register", "claude", "--pid", &p.to_string()], &env);
+    t.env(&["register", "claude", "--pid", &p], &env);
     let (rc, o) = t.env(&["whoami"], &env);
     assert_eq!((rc, o["role"].as_str()), (0, Some("claude")));
     let (rc, o) = t.run(&["whoami"]);
@@ -1238,6 +1239,42 @@ fn wait_replies_stops_for_ended_session() {
 }
 
 #[test]
+fn wait_replies_allows_a_final_reply_during_exit_settlement() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let px = t.reg("x", "codex");
+    let mid = id(&t.out(&["--as", "lead", "send", "x", "q?"]));
+    t.kill(px);
+    let o = thread::scope(|s| {
+        let t = &t;
+        let mid = &mid;
+        s.spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            t.run(&[
+                "--as",
+                "x",
+                "send",
+                "lead",
+                "last answer",
+                "--reply-to",
+                mid,
+            ]);
+        });
+        t.out(&[
+            "--as",
+            "lead",
+            "wait",
+            "--replies-to",
+            mid,
+            "--timeout",
+            "10",
+        ])
+    });
+    assert_eq!(strs(&o["replied"]), ["x"], "{o}");
+    assert_eq!(o["ended"], json!([]), "{o}");
+}
+
+#[test]
 fn wait_replies_times_out_with_stragglers() {
     let mut t = Team::new();
     t.reg("lead", "claude");
@@ -1358,6 +1395,30 @@ fn broken_driver_file_keeps_builtins() {
     t.reg("a", "claude");
     t.reg("b", "codex");
     assert_eq!(t.env(&["--as", "a", "send", "b", "x"], &env).0, 0);
+}
+
+#[test]
+fn broken_harness_file_is_reported_without_losing_builtins() {
+    let t = Team::new();
+    let harnesses = t.write("harnesses.json", r#"[{"name":"good"},{"launch":"bad"}]"#);
+    let (_, o) = exec(
+        None,
+        &["extensions"],
+        Opts {
+            env: &[("TINCAN_HARNESSES", harnesses.as_str())],
+            ..Opts::default()
+        },
+    );
+    assert_eq!(o["ok"], false, "{o}");
+    let names: Vec<&str> = o["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"good"), "{o}");
+    assert!(names.contains(&"claude"), "{o}");
+    assert!(o["errors"][0].as_str().unwrap().contains("name"), "{o}");
 }
 
 #[test]
@@ -1496,6 +1557,32 @@ fn team_outside_any_repo_uses_per_user_default() {
 }
 
 #[test]
+fn first_inbox_reports_team_and_registration_setup() {
+    let d = TmpDir::new();
+    std::fs::create_dir_all(d.0.join(".git")).unwrap();
+    let mut owner = sleeper().spawn().unwrap();
+    let pid = owner.id().to_string();
+    let (rc, inbox) = exec(
+        None,
+        &["inbox"],
+        Opts {
+            env: &agent_env(&pid),
+            cwd: Some(&d.0),
+            ..Opts::default()
+        },
+    );
+    let _ = owner.kill();
+    let _ = owner.wait();
+    assert_eq!(rc, 0, "{inbox}");
+    let setup = inbox["setup"].as_str().unwrap();
+    assert!(setup.contains("Created team"), "{inbox}");
+    assert!(
+        setup.contains("Registered this session as 'claude'"),
+        "{inbox}"
+    );
+}
+
+#[test]
 fn agent_session_auto_registers_as_harness_name() {
     let mut t = Team::new();
     let (a, b) = (t.owner().to_string(), t.owner().to_string());
@@ -1506,6 +1593,8 @@ fn agent_session_auto_registers_as_harness_name() {
     // a second live claude session gets the next free name
     let (_, o) = t.env(&["peers"], &agent_env(&b));
     assert!(o["setup"].as_str().unwrap().contains("'claude-2'"), "{o}");
+    assert_eq!(o["registered"], true, "{o}");
+    assert_eq!(o["self"]["role"], "claude-2", "{o}");
     assert_eq!(roles(&o), ["claude", "claude-2"]);
     // and can message the first with no setup at all
     let (rc, o) = t.env(&["send", "claude", "hi"], &agent_env(&b));
@@ -1536,7 +1625,10 @@ fn plain_shell_is_not_auto_registered() {
     let t = Team::new();
     let (rc, o) = t.run(&["whoami"]);
     assert_eq!((rc, o["error"].as_str()), (6, Some("not_registered")));
-    assert_eq!(roles(&t.out(&["peers"])).len(), 0);
+    let peers = t.out(&["peers"]);
+    assert_eq!(roles(&peers).len(), 0);
+    assert_eq!(peers["registered"], false, "{peers}");
+    assert!(peers["self"].is_null(), "{peers}");
 }
 
 #[test]
@@ -1745,6 +1837,177 @@ fn fake_harness(t: &Team, launch: &[&str]) -> String {
     )
     .unwrap();
     path.to_string_lossy().into_owned()
+}
+
+#[cfg(unix)]
+fn cwd_reply_harness(path: &Path, name: &str) -> String {
+    let config = path.join(format!("{name}-harnesses.json"));
+    std::fs::write(
+        &config,
+        json!([{
+            "name": name,
+            "launch": [
+                "sh",
+                "-c",
+                "exec \"$1\" reply \"$2\" \"$PWD\"",
+                "sh",
+                BIN,
+                "{message_id}"
+            ]
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    config.to_string_lossy().into_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn launched_harness_uses_worktree_instead_of_shared_team_checkout() {
+    let d = TmpDir::new();
+    let main = d.0.join("repo");
+    std::fs::create_dir_all(main.join(".git/worktrees/feat")).unwrap();
+    let worktree = d.0.join("repo-feat");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", main.join(".git/worktrees/feat").display()),
+    )
+    .unwrap();
+    let harnesses = cwd_reply_harness(&main, "fake-worktree");
+    let env = [
+        ("TINCAN_HARNESSES", harnesses.as_str()),
+        ("TINCAN_LAUNCHED", ""),
+    ];
+    // A same-named harness in the shared main checkout must not receive worktree-local work.
+    assert_eq!(
+        exec(
+            None,
+            &[
+                "register",
+                "fake-worktree",
+                "--harness",
+                "fake-worktree",
+                "--pid",
+                "0",
+            ],
+            Opts {
+                env: &env,
+                cwd: Some(&main),
+                ..Opts::default()
+            },
+        )
+        .0,
+        0
+    );
+    let opts = Opts {
+        env: &env,
+        cwd: Some(&worktree),
+        ..Opts::default()
+    };
+    assert_eq!(
+        exec(
+            None,
+            &["register", "lead", "--harness", "test", "--pid", "0"],
+            opts,
+        )
+        .0,
+        0
+    );
+    let (rc, sent) = exec(
+        None,
+        &["--as", "lead", "send", "fake-worktree", "where?"],
+        opts,
+    );
+    assert_eq!(rc, 0, "{sent}");
+    let expected = std::fs::canonicalize(&worktree).unwrap();
+    assert_eq!(sent["launched"]["role"], "fake-worktree-2", "{sent}");
+    assert_eq!(
+        sent["launched"]["workspace"],
+        expected.to_string_lossy().as_ref()
+    );
+    let mid = id(&sent);
+    let (_, waited) = exec(
+        None,
+        &[
+            "--as",
+            "lead",
+            "wait",
+            "--replies-to",
+            &mid,
+            "--timeout",
+            "20",
+        ],
+        opts,
+    );
+    assert_eq!(strs(&waited["replied"]), ["fake-worktree-2"], "{waited}");
+    let (_, inbox) = exec(None, &["--as", "lead", "inbox"], opts);
+    assert_eq!(bodies(&inbox), [expected.to_string_lossy().as_ref()]);
+    assert!(main.join(".tincan").is_dir());
+    assert!(!worktree.join(".tincan").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn projectless_launch_uses_callers_working_directory() {
+    let d = TmpDir::new();
+    let home = d.0.join("home");
+    let appdata = home.join("appdata");
+    let workspace = d.0.join("scratch");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let harnesses = cwd_reply_harness(&d.0, "fake-projectless");
+    let home_s = home.to_string_lossy().into_owned();
+    let appdata_s = appdata.to_string_lossy().into_owned();
+    let env = [
+        ("HOME", home_s.as_str()),
+        ("USERPROFILE", home_s.as_str()),
+        ("LOCALAPPDATA", appdata_s.as_str()),
+        ("TINCAN_HARNESSES", harnesses.as_str()),
+        ("TINCAN_LAUNCHED", ""),
+    ];
+    let opts = Opts {
+        env: &env,
+        cwd: Some(&workspace),
+        ..Opts::default()
+    };
+    assert_eq!(
+        exec(
+            None,
+            &["register", "lead", "--harness", "test", "--pid", "0"],
+            opts,
+        )
+        .0,
+        0
+    );
+    let (_, sent) = exec(
+        None,
+        &["--as", "lead", "send", "fake-projectless", "where?"],
+        opts,
+    );
+    let expected = std::fs::canonicalize(&workspace).unwrap();
+    assert_eq!(
+        sent["launched"]["workspace"],
+        expected.to_string_lossy().as_ref()
+    );
+    let mid = id(&sent);
+    let (_, waited) = exec(
+        None,
+        &[
+            "--as",
+            "lead",
+            "wait",
+            "--replies-to",
+            &mid,
+            "--timeout",
+            "20",
+        ],
+        opts,
+    );
+    assert_eq!(strs(&waited["replied"]), ["fake-projectless"], "{waited}");
+    let (_, inbox) = exec(None, &["--as", "lead", "inbox"], opts);
+    assert_eq!(bodies(&inbox), [expected.to_string_lossy().as_ref()]);
+    assert!(appdata.join("tincan/default/.tincan").is_dir());
+    assert!(!workspace.join(".tincan").exists());
 }
 
 #[test]

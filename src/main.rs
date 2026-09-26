@@ -152,11 +152,8 @@ fn main() {
 }
 
 /// Anything tincan set up on its own (a team, a registration) is confirmed in the output.
-fn with_setup(mut v: serde_json::Value) -> serde_json::Value {
-    if let (Some(obj), Some(setup)) = (v.as_object_mut(), store::take_notes()) {
-        obj.insert("setup".into(), setup.into());
-    }
-    v
+fn with_setup(v: serde_json::Value) -> serde_json::Value {
+    store::attach_notes(v)
 }
 
 fn fail(e: TincanError) -> ! {
