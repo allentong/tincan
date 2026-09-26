@@ -1602,6 +1602,69 @@ fn init_without_team_dir_initialises_cwd() {
     assert_eq!(exec(None, &["peers"], opts).0, 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn team_store_rejects_symlinks_and_repairs_private_permissions() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let root = TmpDir::new();
+    let target = root.0.join("elsewhere");
+    let linked_team = root.0.join("linked-team");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir_all(&linked_team).unwrap();
+    symlink(&target, linked_team.join(".tincan")).unwrap();
+    let (rc, o) = exec(Some(&linked_team), &["init"], Opts::default());
+    assert_eq!((rc, o["error"].as_str()), (2, Some("no_team")), "{o}");
+    assert!(!target.join("tincan.db").exists());
+
+    let linked_db_team = root.0.join("linked-db-team");
+    let linked_db_store = linked_db_team.join(".tincan");
+    let db_victim = root.0.join("db-victim.txt");
+    std::fs::create_dir_all(&linked_db_store).unwrap();
+    std::fs::write(&db_victim, "not a database").unwrap();
+    symlink(&db_victim, linked_db_store.join("tincan.db")).unwrap();
+    let (rc, o) = exec(Some(&linked_db_team), &["init"], Opts::default());
+    assert_eq!((rc, o["error"].as_str()), (10, Some("store")), "{o}");
+    assert_eq!(
+        std::fs::read_to_string(db_victim).unwrap(),
+        "not a database"
+    );
+
+    let private_team = root.0.join("private-team");
+    let store = private_team.join(".tincan");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(exec(Some(&private_team), &["init"], Opts::default()).0, 0);
+    let dir_mode = std::fs::metadata(&store).unwrap().permissions().mode() & 0o777;
+    let db_mode = std::fs::metadata(store.join("tincan.db"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!((dir_mode, db_mode), (0o700, 0o600));
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_log_refuses_a_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let victim = t.path("victim.txt");
+    std::fs::write(&victim, "keep me").unwrap();
+    symlink(&victim, t.path(".tincan/launch-fake.log")).unwrap();
+    let h = fake_harness(&t, &[BIN, "whoami"]);
+    let env = [("TINCAN_HARNESSES", h.as_str()), ("TINCAN_LAUNCHED", "")];
+    let (rc, o) = t.env(&["--as", "lead", "send", "fake", "x"], &env);
+    assert_eq!(
+        (rc, o["error"].as_str()),
+        (3, Some("peer_unavailable")),
+        "{o}"
+    );
+    assert_eq!(std::fs::read_to_string(victim).unwrap(), "keep me");
+}
+
 #[test]
 fn bad_roles_and_durations_rejected() {
     let mut t = Team::new();
