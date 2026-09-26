@@ -451,8 +451,9 @@ fn send(
     }
     let launched = match launch {
         Some(argv) => {
-            // Started under the write lock, so its first `tincan inbox` waits for this commit;
-            // if it can't start, the whole send rolls back.
+            // Started under the write lock, and a started session takes that lock before its
+            // first read (store::connect), so it sees this commit; if it can't start, the whole
+            // send rolls back.
             let role = &recipients[0];
             let (pid, log) = launch_agent(&argv, &o.team, role, &me.role, &id, o.stay)?;
             // Mail belongs to a session: the new one starts with just this message.
