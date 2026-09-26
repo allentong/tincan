@@ -19,7 +19,8 @@ pub struct Profile {
     /// Settings file (relative to the project) for Claude-Code-style command hooks; None = no hooks.
     pub hooks_file: Option<String>,
     /// argv that starts a quick headless session to answer mail sent to this harness's name
-    /// while none is running. Placeholders: {prompt} {team} {role} {sender} {message_id}.
+    /// while none is running. Placeholders: {prompt} {team} {cwd} {role} {sender} {message_id}.
+    /// It runs in the sender's working directory ({cwd}).
     pub launch: Option<Vec<String>>,
 }
 
@@ -72,7 +73,8 @@ pub fn builtins() -> Vec<Profile> {
             marker_env: strs(&["CODEX_THREAD_ID", "CODEX_SANDBOX"]),
             busy_text: Some("esc to interrupt".into()),
             hooks_file: Some(".codex/hooks.json".into()),
-            // workspace-write: the team store lives in the repo, and tincan must write to it.
+            // workspace-write: it edits the sender's checkout, and the team store (in the repo, or the
+            // main checkout for a worktree) must be writable too.
             launch: Some(strs(&[
                 "codex",
                 "exec",
@@ -80,6 +82,8 @@ pub fn builtins() -> Vec<Profile> {
                 "-s",
                 "workspace-write",
                 "-C",
+                "{cwd}",
+                "--add-dir",
                 "{team}",
                 "{prompt}",
             ])),

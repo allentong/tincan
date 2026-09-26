@@ -142,6 +142,11 @@ pub fn connect(db: &Path) -> Result<Connection> {
         }
         tx.commit()?;
     }
+    // A started session is spawned while its sender still holds the write lock, and WAL reads
+    // don't wait for writers: take the lock once so its first read sees its own registration.
+    if std::env::var("TINCAN_LAUNCHED").is_ok_and(|v| !v.is_empty()) {
+        conn.execute_batch("BEGIN IMMEDIATE; COMMIT;")?;
+    }
     Ok(conn)
 }
 

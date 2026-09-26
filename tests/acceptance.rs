@@ -1524,12 +1524,17 @@ fn install_skills_puts_the_skill_where_harnesses_look() {
     };
     let (rc, o) = exec(None, &["install-skills"], opts);
     assert_eq!(rc, 0, "{o}");
-    for p in [
-        ".agents/skills/tincan/SKILL.md",
-        ".claude/skills/tincan/SKILL.md",
-    ] {
-        let text = std::fs::read_to_string(d.0.join(p)).unwrap();
-        assert!(text.starts_with("---\nname: tincan"), "{p}");
+    for root in [".agents/skills", ".claude/skills"] {
+        // outside the plugin the recipes are prefixed, and each name matches its directory
+        for name in ["tincan", "tincan-consult", "tincan-delegate"] {
+            let p = d.0.join(root).join(name).join("SKILL.md");
+            let text = std::fs::read_to_string(&p).unwrap();
+            assert!(
+                text.starts_with(&format!("---\nname: {name}\n")),
+                "{}",
+                p.display()
+            );
+        }
     }
     // with the Claude Code plugin installed, its own copy is used instead
     std::fs::remove_dir_all(d.0.join(".claude/skills")).unwrap();
@@ -1537,6 +1542,18 @@ fn install_skills_puts_the_skill_where_harnesses_look() {
     let (_, o) = exec(None, &["install-skills"], opts);
     assert_eq!(o["skipped"][0]["for"], "claude", "{o}");
     assert!(!d.0.join(".claude/skills/tincan").exists());
+}
+
+#[test]
+fn empty_body_is_rejected() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    for body in ["", "  \n"] {
+        let (rc, o) = t.run(&["--as", "a", "send", "b", body]);
+        assert_eq!(rc, 2, "{o}");
+    }
+    assert!(msgs(&t.out(&["--as", "b", "inbox"])).is_empty());
 }
 
 #[test]
@@ -1578,6 +1595,52 @@ fn fake_harness(t: &Team, launch: &[&str]) -> String {
 }
 
 #[test]
+fn started_session_works_in_the_senders_directory() {
+    // a worktree shares the main checkout's team, but its files are in the worktree
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let work = t.dir.join("worktree");
+    std::fs::create_dir_all(&work).unwrap();
+    let h = fake_harness(
+        &t,
+        &[
+            BIN,
+            "send",
+            "{sender}",
+            "{cwd}",
+            "--reply-to",
+            "{message_id}",
+        ],
+    );
+    let env = [("TINCAN_HARNESSES", h.as_str()), ("TINCAN_LAUNCHED", "")];
+    let (rc, o) = t.with(
+        &["--as", "lead", "send", "fake", "where are you?"],
+        Opts {
+            env: &env,
+            cwd: Some(&work),
+            ..Opts::default()
+        },
+    );
+    assert_eq!(rc, 0, "{o}");
+    let mid = id(&o);
+    t.env(
+        &[
+            "--as",
+            "lead",
+            "wait",
+            "--replies-to",
+            &mid,
+            "--timeout",
+            "20",
+        ],
+        &env,
+    );
+    let inbox = t.out(&["--as", "lead", "inbox"]);
+    let got = std::fs::canonicalize(bodies(&inbox)[0]).unwrap();
+    assert_eq!(got, std::fs::canonicalize(&work).unwrap());
+}
+
+#[test]
 fn mail_to_a_missing_harness_starts_a_quick_session_that_answers() {
     let mut t = Team::new();
     t.reg("lead", "claude");
@@ -1609,7 +1672,9 @@ fn mail_to_a_missing_harness_starts_a_quick_session_that_answers() {
         ],
         &env,
     );
-    assert_eq!(strs(&w["replied"]), ["fake"], "{w}");
+    // on failure, show what the started session printed
+    let log = std::fs::read_to_string(o["launched"]["log"].as_str().unwrap()).unwrap_or_default();
+    assert_eq!(strs(&w["replied"]), ["fake"], "{w}\nlaunch log:\n{log}");
     let inbox = t.out(&["--as", "lead", "inbox"]);
     assert_eq!(bodies(&inbox), ["pong from fake"]);
     assert_eq!(msgs(&inbox)[0]["reply_to"], mid.as_str());
