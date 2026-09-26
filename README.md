@@ -81,7 +81,7 @@ There is no setup step. The first time a session uses tincan (or starts, if hook
 tincan peers                                  # joins the team; lists who's online
 tincan send codex "Can you review src/auth.rs?"
 tincan inbox                                  # in the Codex session
-tincan send claude "Two issues, see notes.md" --reply-to <id>
+tincan reply <id> -                           # body is read from stdin
 ```
 
 **Asking an agent that isn't running.** Send to its harness name anyway. tincan starts a quick headless session (`claude -p`, `codex exec`, `grok -p`) in the team dir, and it answers and exits:
@@ -92,7 +92,7 @@ tincan wait --replies-to <id>                                   # returns once c
 tincan inbox
 ```
 
-The quick session reads the question with `tincan inbox` and replies with `--reply-to`. It can do work, not just answer. Codex's runs in its `workspace-write` sandbox. Claude's may edit files and run a fixed list of local commands (`tincan`, local `git` without push, and `cargo`/`npm`/`pnpm`/`pytest`/`go` build and test); anything else, including network access, is denied. Because it takes direction from another agent rather than from you, override `launch` for `claude` in `harnesses.json` to widen that list. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
+The quick session reads the question with `tincan inbox` and replies with `tincan reply`. It can do work, not just answer. Codex's runs in its `workspace-write` sandbox. Claude's may edit files and run a fixed list of non-privileged tincan commands, local `git` without push, and `cargo`/`npm`/`pnpm`/`pytest`/`go` build and test; anything else, including network access, is denied. A launched session cannot override its role/team, change tincan configuration, or start another session. It receives only path, locale, platform runtime, and explicitly configured environment variables. Because it takes direction from another agent rather than from you, override `launch` or `pass_env` for `claude` in `harnesses.json` only when the added capability is trusted. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
 
 **Keeping it for follow-ups.** With `--stay`, the started session answers or does the task, can ask the sender questions (`tincan send <sender> "…"`), and waits for more. It ends when told it's done, or when the sender's session ends. Follow-ups go to it by name, with its context intact. `--new` starts a fresh session under the next free name (`claude-2`) even when one is running.
 
@@ -182,11 +182,12 @@ Check what's loaded with `tincan extensions`. Bad config is reported there; the 
 [
   {"name": "opencode", "process_names": ["opencode"],
    "session_env": ["OPENCODE_SESSION_ID"], "busy_text": "esc to interrupt",
-   "launch": ["opencode", "run", "{prompt}"]}
+   "launch": ["opencode", "run", "{prompt}"],
+   "pass_env": ["OPENROUTER_API_KEY"]}
 ]
 ```
 
-`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}`, `{role}`, `{sender}`, `{message_id}`.
+`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}`, `{role}`, `{sender}`, `{message_id}`. Child processes start with a minimal environment; `pass_env` is the explicit opt-in for any additional variable the harness requires. Treat every added credential as granting the launched agent that credential's authority.
 
 Without a profile, any harness can still use `--as ROLE` or `TINCAN_ROLE`.
 

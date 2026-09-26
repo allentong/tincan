@@ -81,6 +81,12 @@ pub enum Cmd {
         #[arg(long)]
         new: bool,
     },
+    /// Reply to a message; the original sender is resolved from `<id>`
+    Reply {
+        id: String,
+        /// Reply body; `-` reads stdin
+        body: String,
+    },
     /// Read unread messages
     Inbox {
         /// Show without leasing or marking read
