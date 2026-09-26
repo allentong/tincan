@@ -21,6 +21,9 @@ pub struct Profile {
     /// argv that starts a quick headless session to answer mail sent to this harness's name
     /// while none is running. Placeholders: {prompt} {team} {role} {sender} {message_id}.
     pub launch: Option<Vec<String>>,
+    /// Additional environment variables explicitly passed to a launched session. The default
+    /// launch environment contains only paths, locale, and platform runtime variables.
+    pub pass_env: Vec<String>,
 }
 
 fn strs(v: &[&str]) -> Vec<String> {
@@ -37,9 +40,10 @@ pub fn builtins() -> Vec<Profile> {
             busy_text: Some("esc to interrupt".into()),
             hooks_file: Some(".claude/settings.local.json".into()),
             // A launched Claude is driven by another agent's messages, not by the user, so it gets
-            // edits plus a fixed list of local commands: tincan, read-only and local git, build and
-            // test. Nothing that reaches the network or leaves the repo (no git push, curl, rm -rf);
-            // anything else is denied. Widen it per machine with `launch` in harnesses.json.
+            // edits plus a fixed list of local commands: the non-privileged tincan operations,
+            // read-only and local git, build and test. Nothing that reaches the network or leaves
+            // the repo (no git push, curl, rm -rf); anything else is denied. Widen it per machine
+            // with `launch` in harnesses.json.
             launch: Some(strs(&[
                 "claude",
                 "-p",
@@ -47,7 +51,14 @@ pub fn builtins() -> Vec<Profile> {
                 "--permission-mode",
                 "acceptEdits",
                 "--allowedTools",
-                "Bash(tincan:*)",
+                "Bash(tincan inbox:*)",
+                "Bash(tincan reply:*)",
+                "Bash(tincan send:*)",
+                "Bash(tincan wait:*)",
+                "Bash(tincan ack:*)",
+                "Bash(tincan whoami:*)",
+                "Bash(tincan peers:*)",
+                "Bash(tincan unregister:*)",
                 "Bash(git status:*)",
                 "Bash(git diff:*)",
                 "Bash(git log:*)",
@@ -64,6 +75,7 @@ pub fn builtins() -> Vec<Profile> {
                 "Bash(pytest:*)",
                 "Bash(go test:*)",
             ])),
+            pass_env: vec![],
         },
         Profile {
             name: "codex".into(),
@@ -83,6 +95,7 @@ pub fn builtins() -> Vec<Profile> {
                 "{team}",
                 "{prompt}",
             ])),
+            pass_env: vec![],
         },
         Profile {
             name: "grok".into(),
@@ -92,6 +105,7 @@ pub fn builtins() -> Vec<Profile> {
             busy_text: Some("[stop]".into()),
             hooks_file: Some(".grok/hooks/tincan.json".into()),
             launch: Some(strs(&["grok", "-p", "{prompt}"])),
+            pass_env: vec![],
         },
     ]
 }
@@ -139,7 +153,8 @@ fn user_profiles() -> Vec<Profile> {
 }
 
 /// `{"name": "opencode", "process_names": ["opencode"], "session_env": [...], "marker_env": [...],
-///   "busy_text": "esc to interrupt", "hooks_file": null, "launch": ["opencode", "run", "{prompt}"]}`
+///   "busy_text": "esc to interrupt", "hooks_file": null, "launch": ["opencode", "run", "{prompt}"],
+///   "pass_env": ["OPENROUTER_API_KEY"]}`
 /// — only `name` is required.
 fn parse(v: &Value) -> Option<Profile> {
     let list = |k: &str| -> Vec<String> {
@@ -178,6 +193,7 @@ fn parse(v: &Value) -> Option<Profile> {
                     .collect::<Vec<_>>()
             })
             .filter(|a| !a.is_empty()),
+        pass_env: list("pass_env"),
         name,
     })
 }
@@ -192,6 +208,13 @@ mod tests {
         let p = parse(&json!({"name": "opencode"})).unwrap();
         assert_eq!(p.process_names, vec!["opencode"]);
         assert!(p.hooks_file.is_none());
+        assert!(p.pass_env.is_empty());
+    }
+
+    #[test]
+    fn parse_explicit_launch_environment() {
+        let p = parse(&json!({"name": "opencode", "pass_env": ["OPENROUTER_API_KEY"]})).unwrap();
+        assert_eq!(p.pass_env, vec!["OPENROUTER_API_KEY"]);
     }
 
     #[test]
