@@ -1,5 +1,6 @@
 use crate::error::{Code, Result, TincanError};
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -45,7 +46,7 @@ pub fn resolve_team(flag: Option<&str>, init: bool) -> Result<(PathBuf, PathBuf)
         }
         None => {
             let cwd = std::env::current_dir().unwrap_or_default();
-            match find_upwards(&cwd) {
+            match find_upwards(&cwd)? {
                 Some(d) => d,
                 None if init => cwd,
                 None => git_root(&cwd)
@@ -55,24 +56,58 @@ pub fn resolve_team(flag: Option<&str>, init: bool) -> Result<(PathBuf, PathBuf)
         }
     };
     let tincan_dir = dir.join(".tincan");
-    if !tincan_dir.is_dir() {
-        create_private_dir(&tincan_dir)
-            .and_then(|_| std::fs::write(tincan_dir.join(".gitignore"), "*\n"))
-            .map_err(|e| TincanError::new(Code::NoTeam, e.to_string()))?;
-        note(format!(
-            "Created team at {} (git-ignored).",
-            tincan_dir.display()
-        ));
+    match std::fs::symlink_metadata(&tincan_dir) {
+        Ok(meta) if is_plain_dir(&meta) => {
+            harden_dir(&tincan_dir).map_err(|e| TincanError::new(Code::NoTeam, e.to_string()))?
+        }
+        Ok(_) => {
+            return Err(TincanError::new(
+                Code::NoTeam,
+                format!(
+                    "refusing team store {}: .tincan must be a real directory, not a symlink, reparse point, or file",
+                    tincan_dir.display()
+                ),
+            ));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            create_private_dir(&tincan_dir)
+                .and_then(|_| std::fs::write(tincan_dir.join(".gitignore"), "*\n"))
+                .map_err(|e| TincanError::new(Code::NoTeam, e.to_string()))?;
+            note(format!(
+                "Created team at {} (git-ignored).",
+                tincan_dir.display()
+            ));
+        }
+        Err(e) => return Err(TincanError::new(Code::NoTeam, e.to_string())),
     }
-    let db = tincan_dir.join("tincan.db");
+    // SQLite's NOFOLLOW flag rejects symlinks in any path component. Canonicalize only after
+    // validating that `.tincan` itself is a real directory, so ordinary platform aliases such as
+    // macOS `/var` -> `/private/var` work without allowing the store to redirect elsewhere.
+    let db = std::fs::canonicalize(&tincan_dir)
+        .map_err(|e| TincanError::new(Code::NoTeam, e.to_string()))?
+        .join("tincan.db");
     Ok((dir, db))
 }
 
-fn find_upwards(start: &Path) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .find(|d| d.join(".tincan").is_dir())
-        .map(Path::to_path_buf)
+fn find_upwards(start: &Path) -> Result<Option<PathBuf>> {
+    for dir in start.ancestors() {
+        let candidate = dir.join(".tincan");
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(meta) if is_plain_dir(&meta) => return Ok(Some(dir.to_path_buf())),
+            Ok(_) => {
+                return Err(TincanError::new(
+                    Code::NoTeam,
+                    format!(
+                        "refusing team store {}: .tincan must be a real directory, not a symlink, reparse point, or file",
+                        candidate.display()
+                    ),
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(TincanError::new(Code::NoTeam, e.to_string())),
+        }
+    }
+    Ok(None)
 }
 
 /// The repo's main checkout, so sessions in any of its worktrees share one team.
@@ -126,7 +161,11 @@ pub fn take_notes() -> Option<String> {
 const SCHEMA_VERSION: i64 = 4;
 
 pub fn connect(db: &Path) -> Result<Connection> {
-    let mut conn = Connection::open(db)?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let mut conn = Connection::open_with_flags(db, flags)?;
     conn.busy_timeout(Duration::from_secs(10))?;
     conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
     if user_version(&conn)? != SCHEMA_VERSION {
@@ -142,6 +181,13 @@ pub fn connect(db: &Path) -> Result<Connection> {
         }
         tx.commit()?;
     }
+    for path in [
+        db.to_path_buf(),
+        db.with_extension("db-wal"),
+        db.with_extension("db-shm"),
+    ] {
+        harden_file(&path).map_err(|e| TincanError::new(Code::Store, e.to_string()))?;
+    }
     Ok(conn)
 }
 
@@ -156,4 +202,81 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
     b.create(dir)
+}
+
+fn is_plain_dir(meta: &std::fs::Metadata) -> bool {
+    if !meta.file_type().is_dir() || meta.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn harden_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+fn harden_file(path: &Path) -> std::io::Result<()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if !meta.file_type().is_file() || meta.file_type().is_symlink() {
+        return Err(std::io::Error::other(format!(
+            "refusing non-regular private file {}",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Open a private, replaceable output file without following a final symlink.
+pub fn create_private_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_type().is_symlink()
+            || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(std::io::Error::other(format!(
+                "refusing reparse point {}",
+                path.display()
+            )));
+        }
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
 }

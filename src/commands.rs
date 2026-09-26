@@ -2,7 +2,7 @@ use crate::error::{Code, Result, TincanError};
 use crate::identity::{
     self, LazyCaller, PEER_COLS, Peer, PeerState, me, peer_from_row, touch, whoami,
 };
-use crate::store::{connect, now, resolve_team};
+use crate::store::{connect, create_private_file, now, resolve_team};
 use crate::{Cli, Cmd, harness, hooks, wake};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use serde_json::{Value, json};
@@ -626,7 +626,7 @@ fn launch_agent(
         )
         .with("argv", argv.clone())
     };
-    let out = std::fs::File::create(&log).map_err(fail)?;
+    let out = create_private_file(&log).map_err(fail)?;
     let err = out.try_clone().map_err(fail)?;
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.env_clear();
