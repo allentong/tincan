@@ -25,6 +25,13 @@ echo "Downloading $url"
 curl -fsSL "$url" -o "$tmp/$asset"
 curl -fsSL "$url.sha256" -o "$tmp/$asset.sha256"
 (cd "$tmp" && if command -v sha256sum >/dev/null; then sha256sum -c "$asset.sha256"; else shasum -a 256 -c "$asset.sha256"; fi) >/dev/null
+if command -v gh >/dev/null 2>&1 && gh auth status --hostname github.com >/dev/null 2>&1; then
+  gh attestation verify "$tmp/$asset" --repo "$repo" \
+    --signer-workflow "$repo/.github/workflows/release.yml" >/dev/null
+  echo "Verified GitHub build provenance for $asset"
+else
+  echo "GitHub CLI is not authenticated; verified checksum only (see README for provenance verification)."
+fi
 tar -xzf "$tmp/$asset" -C "$tmp"
 mkdir -p "$dir"
 install -m 755 "$tmp/tincan" "$dir/tincan"

@@ -31,6 +31,8 @@ curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | 
 irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex
 ```
 
+Release artifacts carry GitHub build-provenance attestations. When an authenticated GitHub CLI is available, the installers verify that provenance automatically; otherwise they print that only the same-release checksum was verified. You can verify a downloaded archive manually with `gh attestation verify <archive> --repo allentong/tincan --signer-workflow allentong/tincan/.github/workflows/release.yml`.
+
 **Update:** rerun `cargo install --git https://github.com/allentong/tincan --force`, then `tincan install-skills`.
 
 ## Supported

@@ -21,6 +21,19 @@ try {
   $want = (Get-Content (Join-Path $tmp "$asset.sha256") -Raw).Split(' ')[0].Trim().ToLower()
   $got = (Get-FileHash -Algorithm SHA256 (Join-Path $tmp $asset)).Hash.ToLower()
   if ($want -ne $got) { throw "tincan: checksum mismatch for $asset" }
+  $gh = Get-Command gh -ErrorAction SilentlyContinue
+  if ($gh) {
+    & gh auth status --hostname github.com 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      & gh attestation verify (Join-Path $tmp $asset) --repo $repo --signer-workflow "$repo/.github/workflows/release.yml" | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw "tincan: GitHub build provenance verification failed for $asset" }
+      Write-Host "Verified GitHub build provenance for $asset"
+    } else {
+      Write-Host 'GitHub CLI is not authenticated; verified checksum only (see README for provenance verification).'
+    }
+  } else {
+    Write-Host 'GitHub CLI is unavailable; verified checksum only (see README for provenance verification).'
+  }
   Expand-Archive -Path (Join-Path $tmp $asset) -DestinationPath $tmp -Force
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
   Copy-Item -Force (Join-Path $tmp 'tincan.exe') (Join-Path $dir 'tincan.exe')
