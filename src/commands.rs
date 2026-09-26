@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 pub const MAX_BODY: usize = 8 * 1024;
 pub const MAX_HOPS: i64 = 8;
+pub const MAX_PENDING_PER_RECIPIENT: i64 = 512;
+pub const MAX_PENDING_PER_SENDER: i64 = 1024;
 
 fn env_secs(name: &str, default: f64) -> f64 {
     std::env::var(name)
@@ -116,7 +118,8 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                     peek,
                     count,
                     require_ack,
-                } => inbox(&mut conn, as_role, &caller, peek, count, require_ack),
+                    limit,
+                } => inbox(&mut conn, as_role, &caller, peek, count, require_ack, limit),
                 Cmd::Ack { ids } => ack(&conn, as_role, &caller, &ids),
                 Cmd::Wait {
                     timeout,
@@ -434,6 +437,7 @@ fn send(
     let body = if o.body == "-" {
         let mut s = String::new();
         std::io::stdin()
+            .take((MAX_BODY + 1) as u64)
             .read_to_string(&mut s)
             .map_err(|e| TincanError::new(Code::Usage, e.to_string()))?;
         s
@@ -621,6 +625,38 @@ fn send(
     };
 
     let t = now();
+    let sender_pending: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM deliveries d JOIN messages m ON m.id = d.message_id
+         WHERE m.sender = ?1",
+        [&me.role],
+        |row| row.get(0),
+    )?;
+    if sender_pending + recipients.len() as i64 > MAX_PENDING_PER_SENDER {
+        return Err(TincanError::new(
+            Code::MailboxFull,
+            format!(
+                "sender {:?} has {sender_pending} pending deliveries (max {MAX_PENDING_PER_SENDER})",
+                me.role
+            ),
+        ));
+    }
+    for recipient in &recipients {
+        let pending: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM deliveries WHERE recipient = ?1",
+            [recipient],
+            |row| row.get(0),
+        )?;
+        if pending >= MAX_PENDING_PER_RECIPIENT {
+            return Err(TincanError::new(
+                Code::MailboxFull,
+                format!(
+                    "recipient {recipient:?} has {pending} pending messages (max {MAX_PENDING_PER_RECIPIENT})"
+                ),
+            )
+            .with("recipient", recipient.clone())
+            .with("pending", pending));
+        }
+    }
     let id = new_message_id();
     tx.execute(
         "INSERT INTO messages(id, sender, client_id, kind, body, reply_to, hop, no_reply, created_at, recipients)
@@ -890,6 +926,7 @@ fn inbox(
     peek: bool,
     count: bool,
     require_ack: bool,
+    limit: usize,
 ) -> Result<Option<Value>> {
     let me = me(conn, as_role, caller)?;
     touch(conn, &me.role)?;
@@ -900,14 +937,20 @@ fn inbox(
     let t = now();
     let lease_until = t + lease_secs();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let available: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM deliveries
+         WHERE recipient = ?1 AND (lease_until IS NULL OR lease_until < ?2)",
+        params![me.role, t],
+        |row| row.get(0),
+    )?;
     let messages: Vec<Value> = {
         let mut stmt = tx.prepare(
             "SELECT m.id, m.sender, m.kind, m.body, m.reply_to, m.hop, m.no_reply
              FROM deliveries d JOIN messages m ON m.id = d.message_id
              WHERE d.recipient = ?1 AND (d.lease_until IS NULL OR d.lease_until < ?2)
-             ORDER BY m.created_at, m.id",
+             ORDER BY m.created_at, m.id LIMIT ?3",
         )?;
-        stmt.query_map(params![me.role, t], |r| {
+        stmt.query_map(params![me.role, t, limit as i64], |r| {
             Ok(json!({"id": r.get::<_, String>(0)?, "from": r.get::<_, String>(1)?, "kind": r.get::<_, String>(2)?,
                       "body": r.get::<_, String>(3)?, "reply_to": r.get::<_, Option<String>>(4)?,
                       "hop": r.get::<_, i64>(5)?, "no_reply": r.get::<_, bool>(6)?}))
@@ -934,8 +977,14 @@ fn inbox(
     }
     tx.commit()?;
 
-    let out =
-        crate::store::attach_notes(json!({"ok": true, "role": me.role, "messages": messages}));
+    let remaining = available.saturating_sub(messages.len() as i64);
+    let out = crate::store::attach_notes(json!({
+        "ok": true,
+        "role": me.role,
+        "messages": messages,
+        "remaining": remaining,
+        "has_more": remaining > 0
+    }));
     let mut stdout = std::io::stdout().lock();
     let printed = writeln!(stdout, "{out}")
         .and_then(|_| stdout.flush())

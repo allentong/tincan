@@ -139,13 +139,18 @@ pub fn config(name: &str) -> Result<Option<Value>> {
             ),
         ));
     };
+    let command = |args: &str| {
+        format!(
+            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; command -v tincan >/dev/null 2>&1 && tincan hook {args} || true"
+        )
+    };
     let entry = |cmd: String, timeout: u32| json!([{"hooks": [{"type": "command", "command": cmd, "timeout": timeout}]}]);
     let hooks = json!({
-        "SessionStart": entry("tincan hook --event SessionStart".into(), 10),
-        "UserPromptSubmit": entry("tincan hook --event UserPromptSubmit".into(), 10),
-        "PostToolUse": entry("tincan hook --event PostToolUse".into(), 10),
-        "Stop": entry("tincan hook --event Stop --linger 120".into(), 150),
-        "SessionEnd": entry("tincan hook --event SessionEnd".into(), 1),
+        "SessionStart": entry(command("--event SessionStart"), 10),
+        "UserPromptSubmit": entry(command("--event UserPromptSubmit"), 10),
+        "PostToolUse": entry(command("--event PostToolUse"), 10),
+        "Stop": entry(command("--event Stop --linger 120"), 150),
+        "SessionEnd": entry(command("--event SessionEnd"), 1),
     });
     Ok(Some(
         json!({"ok": true, "harness": name, "file": file, "config": {"hooks": hooks}}),
