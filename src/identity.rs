@@ -264,6 +264,7 @@ pub struct Peer {
     pub status: String,
     /// Wake driver spec (`tmux:%3`, `cmux:<surface>`, `cmd:<shell>`), None = hooks/wait only.
     pub wake: Option<String>,
+    pub workspace: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,7 +298,7 @@ impl Peer {
     }
 }
 
-pub const PEER_COLS: &str = "role, harness, session_key, pid, last_seen, status, wake";
+pub const PEER_COLS: &str = "role, harness, session_key, pid, last_seen, status, wake, workspace";
 
 pub fn peer_from_row(r: &rusqlite::Row) -> rusqlite::Result<Peer> {
     Ok(Peer {
@@ -308,6 +309,7 @@ pub fn peer_from_row(r: &rusqlite::Row) -> rusqlite::Result<Peer> {
         last_seen: r.get(4)?,
         status: r.get(5)?,
         wake: r.get(6)?,
+        workspace: r.get(7)?,
     })
 }
 
@@ -451,13 +453,21 @@ fn auto_register(
     // Mail belongs to a session, not a role: taking over a stale role starts empty.
     tx.execute("DELETE FROM deliveries WHERE recipient = ?1", [&role])?;
     let t = now();
+    let workspace = crate::store::resolve_workspace()?;
     tx.execute(
-        "INSERT INTO peers(role, harness, session_key, pid, registered_at, last_seen, status, wake)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'active', NULL)
+        "INSERT INTO peers(role, harness, session_key, pid, registered_at, last_seen, status, wake, workspace)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'active', NULL, ?6)
          ON CONFLICT(role) DO UPDATE SET harness = excluded.harness, session_key = excluded.session_key,
            pid = excluded.pid, registered_at = excluded.registered_at, last_seen = excluded.last_seen,
-           status = 'active', wake = NULL",
-        params![role, harness, c.session_key, c.owner_pid, t],
+           status = 'active', wake = NULL, workspace = excluded.workspace",
+        params![
+            role,
+            harness,
+            c.session_key,
+            c.owner_pid,
+            t,
+            workspace.to_string_lossy()
+        ],
     )?;
     let peer = get_peer(&tx, &role)?;
     tx.commit()?;

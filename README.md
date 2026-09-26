@@ -73,7 +73,7 @@ Install once (one command, above), then just ask an agent: "message codex and as
 
 There is no setup step. The first time a session uses tincan (or starts, if hooks are installed):
 
-- **Team:** `.tincan/` is created at the git repo root, git-ignored and owner-only. Every session in the repo, including its worktrees, shares it. Outside a repo, sessions share a per-user default team (`~/.local/share/tincan/default`; Windows `%LOCALAPPDATA%\tincan\default`).
+- **Team:** `.tincan/` is created at the git repo root, git-ignored and owner-only. Every session in the repo, including its worktrees, shares it. Each peer also records its actual workspace, and a headless helper starts in the sender's worktree rather than the shared main checkout. Outside a repo, sessions share a per-user default team (`~/.local/share/tincan/default`; Windows `%LOCALAPPDATA%\tincan\default`) while helpers start in the sender's working directory.
 - **Name:** the session registers under its harness name, `claude`, `codex` or `grok`. A second live Claude session gets `claude-2`.
 - **Confirmation:** the command's output carries a `setup` field saying what was created and the name taken, and the skill tells the agent to relay it to you.
 
@@ -182,12 +182,12 @@ Check what's loaded with `tincan extensions`. Bad config is reported there; the 
 [
   {"name": "opencode", "process_names": ["opencode"],
    "session_env": ["OPENCODE_SESSION_ID"], "busy_text": "esc to interrupt",
-   "launch": ["opencode", "run", "{prompt}"],
+   "launch": ["opencode", "run", "--dir", "{workspace}", "{prompt}"],
    "pass_env": ["OPENROUTER_API_KEY"]}
 ]
 ```
 
-`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}`, `{role}`, `{sender}`, `{message_id}`. Child processes start with a minimal environment; `pass_env` is the explicit opt-in for any additional variable the harness requires. Treat every added credential as granting the launched agent that credential's authority.
+`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}` (shared team root), `{store}` (its `.tincan` directory), `{workspace}` (the sender's checkout or working directory), `{role}`, `{sender}`, `{message_id}`. Child processes start with a minimal environment; `pass_env` is the explicit opt-in for any additional variable the harness requires. Treat every added credential as granting the launched agent that credential's authority.
 
 Without a profile, any harness can still use `--as ROLE` or `TINCAN_ROLE`.
 

@@ -2,7 +2,7 @@ use crate::error::{Code, Result, TincanError};
 use crate::identity::{
     self, LazyCaller, PEER_COLS, Peer, PeerState, me, peer_from_row, touch, whoami,
 };
-use crate::store::{connect, create_private_file, now, resolve_team};
+use crate::store::{connect, create_private_file, now, resolve_team, resolve_workspace};
 use crate::{Cli, Cmd, harness, hooks, wake};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use serde_json::{Value, json};
@@ -51,6 +51,7 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
         cmd => {
             let (dir, db) = resolve_team(team, false)?;
             let mut conn = connect(&db)?;
+            wait_for_launch_commit(&conn)?;
             let caller = LazyCaller::default();
             match cmd {
                 Cmd::Register {
@@ -58,13 +59,25 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                     harness,
                     pid,
                     wake,
-                } => register(&mut conn, &caller, role, harness, pid, wake),
+                } => register(
+                    &mut conn,
+                    &caller,
+                    role,
+                    harness,
+                    pid,
+                    wake,
+                    resolve_workspace()?,
+                ),
                 Cmd::Unregister => unregister(&conn, as_role, &caller),
                 Cmd::Whoami => whoami_cmd(&conn, as_role, &caller),
                 Cmd::Peers { all } => {
-                    // Listing peers joins the team too, so a fresh session shows up for others.
-                    let _ = me(&conn, as_role, &caller);
-                    peers(&conn, all)
+                    // Listing peers joins an agent session, but a plain shell gets truthful state.
+                    let self_peer = match me(&conn, as_role, &caller) {
+                        Ok(peer) => Some(peer),
+                        Err(e) if e.code == Code::NotRegistered => None,
+                        Err(e) => return Err(e),
+                    };
+                    peers(&conn, all, self_peer.as_ref())
                 }
                 Cmd::Send {
                     to,
@@ -86,10 +99,19 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                         stay,
                         new,
                         team: dir,
+                        workspace: resolve_workspace()?,
                     };
                     send(&mut conn, as_role, &caller, opts)
                 }
-                Cmd::Reply { id, body } => reply(&mut conn, as_role, &caller, id, body, dir),
+                Cmd::Reply { id, body } => reply(
+                    &mut conn,
+                    as_role,
+                    &caller,
+                    id,
+                    body,
+                    dir,
+                    resolve_workspace()?,
+                ),
                 Cmd::Inbox {
                     peek,
                     count,
@@ -110,6 +132,38 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                 }
             }
         }
+    }
+}
+
+/// A child can start between `spawn` and the sender transaction's commit. Do not let its first
+/// tincan command observe the store until the message and launched peer are both visible.
+fn wait_for_launch_commit(conn: &Connection) -> Result<()> {
+    if !std::env::var("TINCAN_LAUNCHED").is_ok_and(|value| !value.is_empty()) {
+        return Ok(());
+    }
+    let Some(id) = std::env::var("TINCAN_MESSAGE_ID")
+        .ok()
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(());
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let visible: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+            [&id],
+            |row| row.get(0),
+        )?;
+        if visible {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(TincanError::new(
+                Code::Store,
+                format!("launched message {id} was not committed"),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 
@@ -151,8 +205,10 @@ fn restrict_launched_session(cli: &Cli) -> Result<()> {
 
 /// What's plugged in: lets someone adding a harness or driver check it loaded, without a team.
 fn extensions() -> Value {
-    let (drivers, errors) = wake::load();
-    let harnesses: Vec<Value> = harness::load()
+    let (drivers, mut errors) = wake::load();
+    let (profiles, harness_errors) = harness::load_with_errors();
+    errors.extend(harness_errors);
+    let harnesses: Vec<Value> = profiles
         .iter()
         .map(|p| json!({"name": p.name, "process_names": p.process_names, "hooks_file": p.hooks_file}))
         .collect();
@@ -168,6 +224,7 @@ fn register(
     harness: Option<String>,
     pid: Option<i64>,
     wake: Option<String>,
+    workspace: PathBuf,
 ) -> Result<Option<Value>> {
     if !identity::valid_role(&role) {
         return Err(TincanError::new(
@@ -210,12 +267,20 @@ fn register(
     }
     let t = now();
     tx.execute(
-        "INSERT INTO peers(role, harness, session_key, pid, registered_at, last_seen, status, wake)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'active', ?6)
+        "INSERT INTO peers(role, harness, session_key, pid, registered_at, last_seen, status, wake, workspace)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'active', ?6, ?7)
          ON CONFLICT(role) DO UPDATE SET harness = excluded.harness, session_key = excluded.session_key,
            pid = excluded.pid, registered_at = excluded.registered_at, last_seen = excluded.last_seen,
-           status = 'active', wake = excluded.wake",
-        params![role, harness, caller.session_key, pid, t, wake],
+           status = 'active', wake = excluded.wake, workspace = excluded.workspace",
+        params![
+            role,
+            harness,
+            caller.session_key,
+            pid,
+            t,
+            wake,
+            workspace.to_string_lossy()
+        ],
     )?;
     // One role per session: taking a new name (say, after auto-registration) releases the old one.
     tx.execute(
@@ -226,6 +291,7 @@ fn register(
     tx.commit()?;
     Ok(Some(
         json!({"ok": true, "role": role, "harness": harness, "pid": pid, "wake": wake,
+               "workspace": workspace,
                "reclaimed": existing.is_some(), "dropped_pending": dropped}),
     ))
 }
@@ -282,7 +348,7 @@ fn whoami_cmd(
     ))
 }
 
-fn peers(conn: &Connection, all: bool) -> Result<Option<Value>> {
+fn peers(conn: &Connection, all: bool, self_peer: Option<&Peer>) -> Result<Option<Value>> {
     let mut stmt = conn.prepare(&format!("SELECT {PEER_COLS} FROM peers ORDER BY role"))?;
     let t = now();
     let list: Vec<Value> = stmt
@@ -292,11 +358,19 @@ fn peers(conn: &Connection, all: bool) -> Result<Option<Value>> {
         .map(|p| (p.state(), p))
         .filter(|(s, _)| all || *s == PeerState::Active)
         .map(|(s, p)| {
-            json!({"role": p.role, "harness": p.harness, "pid": p.pid, "state": s.as_str(),
+            json!({"role": p.role, "harness": p.harness, "pid": p.pid,
+                   "workspace": p.workspace, "state": s.as_str(),
                    "last_seen_s_ago": (t - p.last_seen).round() as i64})
         })
         .collect();
-    Ok(Some(json!({"ok": true, "peers": list})))
+    let self_value =
+        self_peer.map(|p| json!({"role": p.role, "harness": p.harness, "workspace": p.workspace}));
+    Ok(Some(json!({
+        "ok": true,
+        "registered": self_peer.is_some(),
+        "self": self_value,
+        "peers": list
+    })))
 }
 
 struct SendOpts {
@@ -309,6 +383,7 @@ struct SendOpts {
     stay: bool,
     new: bool,
     team: PathBuf,
+    workspace: PathBuf,
 }
 
 fn reply(
@@ -318,6 +393,7 @@ fn reply(
     id: String,
     body: String,
     team: PathBuf,
+    workspace: PathBuf,
 ) -> Result<Option<Value>> {
     let to: String = conn
         .query_row("SELECT sender FROM messages WHERE id = ?1", [&id], |r| {
@@ -339,6 +415,7 @@ fn reply(
             stay: false,
             new: false,
             team,
+            workspace,
         },
     )
 }
@@ -478,8 +555,31 @@ fn send(
                 .iter()
                 .any(|p| p.role == role && p.state() == PeerState::Active)
         };
+        let live_here = |role: &str| {
+            all_peers.iter().any(|p| {
+                p.role == role
+                    && p.state() == PeerState::Active
+                    && Path::new(&p.workspace) == o.workspace
+            })
+        };
+        let harness_target = harness::find(&o.to).is_some_and(|p| p.launch.is_some());
+        let wrong_workspace = harness_target && live(&o.to) && !live_here(&o.to);
+        if wrong_workspace && o.no_launch {
+            let peer_workspace = peer.map(|p| p.workspace.clone()).unwrap_or_default();
+            return Err(TincanError::new(
+                Code::PeerUnavailable,
+                format!(
+                    "peer {:?} is working in {}; this message is from {}",
+                    o.to,
+                    peer_workspace,
+                    o.workspace.display()
+                ),
+            )
+            .with("peer_workspace", peer_workspace)
+            .with("workspace", o.workspace.to_string_lossy().to_string()));
+        }
         let mut to = o.to.clone();
-        if o.new || !live(&o.to) {
+        if o.new || !live(&o.to) || wrong_workspace {
             launch = launch_profile(&o.to, o.no_launch);
             if launch.is_none() && o.new {
                 return Err(TincanError::new(
@@ -539,22 +639,27 @@ fn send(
             // Started under the write lock, so its first `tincan inbox` waits for this commit;
             // if it can't start, the whole send rolls back.
             let role = &recipients[0];
-            let (pid, log) = launch_agent(&profile, &o.team, role, &me.role, &id, o.stay)?;
+            let (pid, log) =
+                launch_agent(&profile, &o.team, &o.workspace, role, &me.role, &id, o.stay)?;
             // Mail belongs to a session: the new one starts with just this message.
             tx.execute(
                 "DELETE FROM deliveries WHERE recipient = ?1 AND message_id != ?2",
                 params![role, id],
             )?;
             tx.execute(
-                "INSERT INTO peers(role, harness, session_key, pid, registered_at, last_seen, status, wake)
-                 VALUES (?1, ?2, NULL, ?3, ?4, ?4, 'active', NULL)
+                "INSERT INTO peers(role, harness, session_key, pid, registered_at, last_seen, status, wake, workspace)
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?4, 'active', NULL, ?5)
                  ON CONFLICT(role) DO UPDATE SET harness = excluded.harness, session_key = NULL,
                    pid = excluded.pid, registered_at = excluded.registered_at,
-                   last_seen = excluded.last_seen, status = 'active', wake = NULL",
-                params![role, o.to, pid, t],
+                   last_seen = excluded.last_seen, status = 'active', wake = NULL,
+                   workspace = excluded.workspace",
+                params![role, o.to, pid, t, o.workspace.to_string_lossy()],
             )?;
-            Some(json!({"role": role, "pid": pid, "log": log, "stay": o.stay,
-                "next": format!("tincan wait --replies-to {id}")}))
+            Some(
+                json!({"role": role, "pid": pid, "log": log, "workspace": o.workspace,
+                "stay": o.stay,
+                "next": format!("tincan wait --replies-to {id}")}),
+            )
         }
         None => None,
     };
@@ -601,6 +706,7 @@ fn launch_profile(to: &str, no_launch: bool) -> Option<harness::Profile> {
 fn launch_agent(
     profile: &harness::Profile,
     team: &Path,
+    workspace: &Path,
     role: &str,
     sender: &str,
     id: &str,
@@ -608,11 +714,16 @@ fn launch_agent(
 ) -> Result<(u32, PathBuf)> {
     let argv = profile.launch.as_deref().expect("launch profile");
     let team_s = team.to_string_lossy();
+    let store = team.join(".tincan");
+    let store_s = store.to_string_lossy();
+    let workspace_s = workspace.to_string_lossy();
     let mut vars = vec![
         ("role", role),
         ("sender", sender),
         ("message_id", id),
         ("team", team_s.as_ref()),
+        ("store", store_s.as_ref()),
+        ("workspace", workspace_s.as_ref()),
     ];
     let template = if stay { STAY_PROMPT } else { QUICK_PROMPT };
     let prompt = wake::fill(&[template.to_string()], &vars).remove(0);
@@ -662,13 +773,15 @@ fn launch_agent(
         }
     }
     cmd.args(&argv[1..])
-        .current_dir(team)
+        .current_dir(workspace)
         .stdin(std::process::Stdio::null())
         .stdout(out)
         .stderr(err)
         .env("TINCAN_ROLE", role)
         .env("TINCAN_TEAM_DIR", team)
+        .env("TINCAN_WORKSPACE_DIR", workspace)
         .env("TINCAN_LAUNCHED", "1")
+        .env("TINCAN_MESSAGE_ID", id)
         // a staying session's `tincan wait` returns lead_gone once the sender's session ends
         .env("TINCAN_LEAD", if stay { sender } else { "" })
         .env_remove("TINCAN_SESSION")
@@ -821,7 +934,8 @@ fn inbox(
     }
     tx.commit()?;
 
-    let out = json!({"ok": true, "role": me.role, "messages": messages});
+    let out =
+        crate::store::attach_notes(json!({"ok": true, "role": me.role, "messages": messages}));
     let mut stdout = std::io::stdout().lock();
     let printed = writeln!(stdout, "{out}")
         .and_then(|_| stdout.flush())
@@ -920,9 +1034,8 @@ fn wait_replies(
     }
     let recipients: Vec<String> = serde_json::from_str(&recipients).unwrap_or_default();
     let deadline = now() + timeout;
+    let mut inactive_since = std::collections::HashMap::new();
     loop {
-        // Liveness before replies: a recipient that replies and exits in between then counts
-        // as replied, never as ended.
         let mut alive = vec![];
         for r in &recipients {
             if identity::get_peer(conn, r)?.is_some_and(|p| p.state() == PeerState::Active) {
@@ -933,12 +1046,31 @@ fn wait_replies(
             .prepare("SELECT DISTINCT sender FROM messages WHERE reply_to = ?1")?
             .query_map([id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        let (waiting, ended): (Vec<String>, Vec<String>) = recipients
-            .iter()
-            .filter(|r| !replied.contains(r))
-            .cloned()
-            .partition(|r| alive.contains(r));
-        if waiting.is_empty() || now() >= deadline {
+        let checked_at = std::time::Instant::now();
+        let deadline_reached = now() >= deadline;
+        let mut waiting = vec![];
+        let mut ended = vec![];
+        for recipient in recipients.iter().filter(|r| !replied.contains(r)) {
+            if alive.contains(recipient) {
+                inactive_since.remove(recipient);
+                waiting.push(recipient.clone());
+                continue;
+            }
+
+            // A quick session can enqueue its reply, exit, and have its transaction become
+            // visible to this connection just afterwards. Briefly settle before calling it ended.
+            let since = inactive_since
+                .entry(recipient.clone())
+                .or_insert(checked_at);
+            if deadline_reached
+                || checked_at.duration_since(*since) >= std::time::Duration::from_millis(500)
+            {
+                ended.push(recipient.clone());
+            } else {
+                waiting.push(recipient.clone());
+            }
+        }
+        if waiting.is_empty() || deadline_reached {
             touch(conn, &me.role)?;
             return Ok(Some(
                 json!({"ok": true, "role": me.role, "id": id, "replied": replied,

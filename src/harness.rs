@@ -19,7 +19,8 @@ pub struct Profile {
     /// Settings file (relative to the project) for Claude-Code-style command hooks; None = no hooks.
     pub hooks_file: Option<String>,
     /// argv that starts a quick headless session to answer mail sent to this harness's name
-    /// while none is running. Placeholders: {prompt} {team} {role} {sender} {message_id}.
+    /// while none is running. Placeholders: {prompt} {team} {store} {workspace} {role} {sender}
+    /// {message_id}.
     pub launch: Option<Vec<String>>,
     /// Additional environment variables explicitly passed to a launched session. The default
     /// launch environment contains only paths, locale, and platform runtime variables.
@@ -92,7 +93,9 @@ pub fn builtins() -> Vec<Profile> {
                 "-s",
                 "workspace-write",
                 "-C",
-                "{team}",
+                "{workspace}",
+                "--add-dir",
+                "{store}",
                 "{prompt}",
             ])),
             pass_env: vec![],
@@ -113,13 +116,17 @@ pub fn builtins() -> Vec<Profile> {
 /// Built-ins merged with the user file; a user profile with a built-in's name replaces it.
 /// Marker env is checked in list order, so user profiles go first: a nested harness wins.
 pub fn load() -> Vec<Profile> {
-    let mut out: Vec<Profile> = user_profiles();
+    load_with_errors().0
+}
+
+pub fn load_with_errors() -> (Vec<Profile>, Vec<String>) {
+    let (mut out, errors) = user_profiles();
     for b in builtins() {
         if !out.iter().any(|p| p.name == b.name) {
             out.push(b);
         }
     }
-    out
+    (out, errors)
 }
 
 /// Home is HOME, else USERPROFILE (Windows).
@@ -139,43 +146,91 @@ pub fn find(name: &str) -> Option<Profile> {
     load().into_iter().find(|p| p.name == name)
 }
 
-fn user_profiles() -> Vec<Profile> {
-    let path = std::env::var_os("TINCAN_HARNESSES")
+fn user_profiles() -> (Vec<Profile>, Vec<String>) {
+    let configured = std::env::var_os("TINCAN_HARNESSES");
+    let path = configured
+        .clone()
         .map(std::path::PathBuf::from)
         .or_else(|| config_file("harnesses.json"));
-    let Some(text) = path.and_then(|p| std::fs::read_to_string(p).ok()) else {
-        return vec![];
+    let Some(path) = path else {
+        return (vec![], vec![]);
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && configured.is_none() => {
+            return (vec![], vec![]);
+        }
+        Err(e) => return (vec![], vec![format!("{}: {e}", path.display())]),
     };
     match serde_json::from_str::<Value>(&text) {
-        Ok(Value::Array(items)) => items.iter().filter_map(parse).collect(),
-        _ => vec![],
+        Ok(Value::Array(items)) => {
+            let mut profiles = vec![];
+            let mut errors = vec![];
+            for item in &items {
+                match parse(item) {
+                    Ok(profile) => profiles.push(profile),
+                    Err(e) => errors.push(format!("{}: {e}", path.display())),
+                }
+            }
+            (profiles, errors)
+        }
+        Ok(_) => (
+            vec![],
+            vec![format!("{}: expected a JSON array", path.display())],
+        ),
+        Err(e) => (vec![], vec![format!("{}: {e}", path.display())]),
     }
 }
 
 /// `{"name": "opencode", "process_names": ["opencode"], "session_env": [...], "marker_env": [...],
-///   "busy_text": "esc to interrupt", "hooks_file": null, "launch": ["opencode", "run", "{prompt}"],
+///   "busy_text": "esc to interrupt", "hooks_file": null,
+///   "launch": ["opencode", "run", "--dir", "{workspace}", "{prompt}"],
 ///   "pass_env": ["OPENROUTER_API_KEY"]}`
 /// — only `name` is required.
-fn parse(v: &Value) -> Option<Profile> {
-    let list = |k: &str| -> Vec<String> {
-        v.get(k)
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|s| s.as_str().map(str::to_string))
-                    .collect()
+fn parse(v: &Value) -> Result<Profile, String> {
+    let list = |key: &str| -> Result<Vec<String>, String> {
+        let Some(value) = v.get(key) else {
+            return Ok(vec![]);
+        };
+        let items = value
+            .as_array()
+            .ok_or_else(|| format!("{key:?} must be an array of strings"))?;
+        items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("{key:?} must contain only strings"))
             })
-            .unwrap_or_default()
+            .collect()
     };
-    let name = v.get("name")?.as_str()?.to_string();
-    let mut process_names = list("process_names");
+    let name = v
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "harness needs a non-empty \"name\"".to_string())?
+        .to_string();
+    if name.len() > 64
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(format!(
+            "invalid harness name {name:?}: use 1-64 letters, digits, '-', '_' or '.'"
+        ));
+    }
+    let mut process_names = list("process_names")?;
     if process_names.is_empty() {
         process_names.push(name.clone());
     }
-    Some(Profile {
+    let launch = match v.get("launch") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(list("launch")?).filter(|items| !items.is_empty()),
+    };
+    Ok(Profile {
         process_names,
-        session_env: list("session_env"),
-        marker_env: list("marker_env"),
+        session_env: list("session_env")?,
+        marker_env: list("marker_env")?,
         busy_text: v
             .get("busy_text")
             .and_then(Value::as_str)
@@ -184,16 +239,8 @@ fn parse(v: &Value) -> Option<Profile> {
             .get("hooks_file")
             .and_then(Value::as_str)
             .map(str::to_string),
-        launch: v
-            .get("launch")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|s| s.as_str().map(str::to_string))
-                    .collect::<Vec<_>>()
-            })
-            .filter(|a| !a.is_empty()),
-        pass_env: list("pass_env"),
+        launch,
+        pass_env: list("pass_env")?,
         name,
     })
 }
@@ -219,6 +266,7 @@ mod tests {
 
     #[test]
     fn parse_requires_name() {
-        assert!(parse(&json!({"process_names": ["x"]})).is_none());
+        assert!(parse(&json!({"process_names": ["x"]})).is_err());
+        assert!(parse(&json!({"name": "../../escape"})).is_err());
     }
 }

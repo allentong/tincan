@@ -98,7 +98,12 @@ fn parse(v: &Value, builtin: bool) -> Result<Driver, String> {
         .and_then(Value::as_str)
         .ok_or("driver needs a \"name\"")?
         .to_string();
-    if RESERVED.contains(&name.as_str()) || name.contains(':') {
+    if RESERVED.contains(&name.as_str())
+        || name.len() > 64
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
         return Err(format!("driver name {name:?} is reserved or invalid"));
     }
     let nudge: Vec<Vec<String>> = v
@@ -227,25 +232,47 @@ pub fn build(spec: &str) -> Option<Box<dyn Waker>> {
 
 /// Run a helper with a hard timeout so a hung terminal never stalls `send`.
 fn run(cmd: &mut Command) -> io::Result<String> {
-    let child = cmd
+    run_with_timeout(cmd, std::time::Duration::from_secs(3))
+}
+
+fn run_with_timeout(cmd: &mut Command, timeout: std::time::Duration) -> io::Result<String> {
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(cmd, 0);
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(cmd, 0x0000_0200);
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    let out = rx
-        .recv_timeout(std::time::Duration::from_secs(3))
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "wake helper timed out"))??;
-    if !out.status.success() {
-        return Err(io::Error::other(format!(
-            "wake helper exited {}",
-            out.status
-        )));
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+            }
+            #[cfg(windows)]
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "wake helper timed out",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let mut bytes = vec![];
+    if let Some(mut stdout) = child.stdout.take() {
+        std::io::Read::read_to_end(&mut stdout, &mut bytes)?;
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    if !status.success() {
+        return Err(io::Error::other(format!("wake helper exited {status}")));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(test)]
@@ -270,6 +297,7 @@ mod tests {
     #[test]
     fn reserved_and_malformed_drivers_rejected() {
         assert!(parse(&json!({"name": "cmd", "nudge": [["x"]]}), false).is_err());
+        assert!(parse(&json!({"name": "../bad", "nudge": [["x"]]}), false).is_err());
         assert!(parse(&json!({"name": "z", "nudge": []}), false).is_err());
         assert!(
             parse(
@@ -279,5 +307,35 @@ mod tests {
             .is_err()
         );
         assert!(parse(&json!({"name": "z", "nudge": [["x", "{text}"]]}), false).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_helper_is_killed() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "tincan-wake-test-{}-{}",
+            std::process::id(),
+            crate::store::now()
+        ));
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "echo $$ > \"$1\"; exec sleep 30",
+            "sh",
+            &pid_file.to_string_lossy(),
+        ]);
+        let started = std::time::Instant::now();
+        let error = run_with_timeout(&mut command, std::time::Duration::from_millis(100))
+            .expect_err("helper should time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(!alive, "helper process {pid} leaked");
+        let _ = std::fs::remove_file(pid_file);
     }
 }
