@@ -16,6 +16,8 @@ use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::io::{IsTerminal, Read};
 
+const WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Never fails the turn: any error means "print nothing".
 pub fn run(team: Option<&str>, as_role: Option<&str>, event: &str, linger: f64) -> Option<Value> {
     let input = read_stdin_json();
@@ -123,7 +125,7 @@ fn stop(conn: &Connection, me: &Peer, linger: f64) -> Result<Option<Value>> {
         if now() >= deadline || !waiting {
             return Ok(None);
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        std::thread::sleep(WAIT_POLL_INTERVAL);
     }
 }
 
