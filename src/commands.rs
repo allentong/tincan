@@ -13,6 +13,7 @@ pub const MAX_BODY: usize = 8 * 1024;
 pub const MAX_HOPS: i64 = 8;
 pub const MAX_PENDING_PER_RECIPIENT: i64 = 512;
 pub const MAX_PENDING_PER_SENDER: i64 = 1024;
+const WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 fn env_secs(name: &str, default: f64) -> f64 {
     std::env::var(name)
@@ -1053,7 +1054,7 @@ fn wait(
                 json!({"ok": true, "role": me.role, "unread": n, "timed_out": n == 0}),
             ));
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        std::thread::sleep(WAIT_POLL_INTERVAL);
     }
 }
 
@@ -1083,42 +1084,28 @@ fn wait_replies(
     }
     let recipients: Vec<String> = serde_json::from_str(&recipients).unwrap_or_default();
     let deadline = now() + timeout;
-    let mut inactive_since = std::collections::HashMap::new();
     loop {
-        let mut alive = vec![];
-        for r in &recipients {
-            if identity::get_peer(conn, r)?.is_some_and(|p| p.state() == PeerState::Active) {
-                alive.push(r.clone());
-            }
-        }
+        let all_peers: Vec<Peer> = conn
+            .prepare(&format!("SELECT {PEER_COLS} FROM peers"))?
+            .query_map([], peer_from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        let alive: std::collections::HashSet<String> = all_peers
+            .into_iter()
+            .filter(|peer| peer.state() == PeerState::Active)
+            .map(|peer| peer.role)
+            .collect();
         let replied: Vec<String> = conn
             .prepare("SELECT DISTINCT sender FROM messages WHERE reply_to = ?1")?
             .query_map([id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        let checked_at = std::time::Instant::now();
+        let replied_set: std::collections::HashSet<&str> =
+            replied.iter().map(String::as_str).collect();
         let deadline_reached = now() >= deadline;
-        let mut waiting = vec![];
-        let mut ended = vec![];
-        for recipient in recipients.iter().filter(|r| !replied.contains(r)) {
-            if alive.contains(recipient) {
-                inactive_since.remove(recipient);
-                waiting.push(recipient.clone());
-                continue;
-            }
-
-            // A quick session can enqueue its reply, exit, and have its transaction become
-            // visible to this connection just afterwards. Briefly settle before calling it ended.
-            let since = inactive_since
-                .entry(recipient.clone())
-                .or_insert(checked_at);
-            if deadline_reached
-                || checked_at.duration_since(*since) >= std::time::Duration::from_millis(500)
-            {
-                ended.push(recipient.clone());
-            } else {
-                waiting.push(recipient.clone());
-            }
-        }
+        let (waiting, ended): (Vec<String>, Vec<String>) = recipients
+            .iter()
+            .filter(|recipient| !replied_set.contains(recipient.as_str()))
+            .cloned()
+            .partition(|recipient| alive.contains(recipient));
         if waiting.is_empty() || deadline_reached {
             touch(conn, &me.role)?;
             return Ok(Some(
@@ -1126,7 +1113,7 @@ fn wait_replies(
                                   "waiting": waiting, "ended": ended, "timed_out": !waiting.is_empty()}),
             ));
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        std::thread::sleep(WAIT_POLL_INTERVAL);
     }
 }
 

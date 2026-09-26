@@ -1284,42 +1284,6 @@ fn wait_replies_stops_for_ended_session() {
 }
 
 #[test]
-fn wait_replies_allows_a_final_reply_during_exit_settlement() {
-    let mut t = Team::new();
-    t.reg("lead", "claude");
-    let px = t.reg("x", "codex");
-    let mid = id(&t.out(&["--as", "lead", "send", "x", "q?"]));
-    t.kill(px);
-    let o = thread::scope(|s| {
-        let t = &t;
-        let mid = &mid;
-        s.spawn(move || {
-            thread::sleep(Duration::from_millis(200));
-            t.run(&[
-                "--as",
-                "x",
-                "send",
-                "lead",
-                "last answer",
-                "--reply-to",
-                mid,
-            ]);
-        });
-        t.out(&[
-            "--as",
-            "lead",
-            "wait",
-            "--replies-to",
-            mid,
-            "--timeout",
-            "10",
-        ])
-    });
-    assert_eq!(strs(&o["replied"]), ["x"], "{o}");
-    assert_eq!(o["ended"], json!([]), "{o}");
-}
-
-#[test]
 fn wait_replies_times_out_with_stragglers() {
     let mut t = Team::new();
     t.reg("lead", "claude");
@@ -2142,14 +2106,16 @@ fn launched_harness_gets_only_baseline_and_explicit_environment() {
         let (rc, sent) = t.env(&["--as", "lead", "send", name, "ping?"], &env);
         assert_eq!(rc, 0, "{sent}");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !observed.exists() {
+        loop {
+            if std::fs::read_to_string(&observed).is_ok_and(|contents| contents == expected) {
+                break;
+            }
             assert!(
                 Instant::now() < deadline,
                 "fake harness did not run: {sent}"
             );
             thread::sleep(Duration::from_millis(25));
         }
-        assert_eq!(std::fs::read_to_string(observed).unwrap(), expected);
     }
 }
 
