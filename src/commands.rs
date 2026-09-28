@@ -119,7 +119,19 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                     count,
                     require_ack,
                     limit,
-                } => inbox(&mut conn, as_role, &caller, peek, count, require_ack, limit),
+                    after,
+                } => inbox(
+                    &mut conn,
+                    as_role,
+                    &caller,
+                    InboxOpts {
+                        peek,
+                        count,
+                        require_ack,
+                        limit,
+                        after,
+                    },
+                ),
                 Cmd::Ack { ids } => ack(&conn, as_role, &caller, &ids),
                 Cmd::Wait {
                     timeout,
@@ -919,28 +931,57 @@ pub fn mark_told(conn: &Connection, role: &str, ids: &[String]) -> Result<()> {
 /// Default inbox is one call for the agent but still at-least-once:
 /// lease -> print and flush -> delete only the rows this call leased.
 /// If the process dies before the flush completes, the lease expires and the messages come back.
-fn inbox(
-    conn: &mut Connection,
-    as_role: Option<&str>,
-    caller: &LazyCaller,
+struct InboxOpts {
     peek: bool,
     count: bool,
     require_ack: bool,
     limit: usize,
+    after: Option<String>,
+}
+
+fn encode_inbox_cursor(created_at: f64, id: &str) -> String {
+    format!("{:016x}:{id}", created_at.to_bits())
+}
+
+fn decode_inbox_cursor(cursor: &str) -> Result<(f64, String)> {
+    let (created_at, id) = cursor
+        .split_once(':')
+        .ok_or_else(|| TincanError::new(Code::Usage, format!("invalid inbox cursor {cursor:?}")))?;
+    let created_at = u64::from_str_radix(created_at, 16)
+        .map(f64::from_bits)
+        .map_err(|_| TincanError::new(Code::Usage, format!("invalid inbox cursor {cursor:?}")))?;
+    if !created_at.is_finite() || id.is_empty() {
+        return Err(TincanError::new(
+            Code::Usage,
+            format!("invalid inbox cursor {cursor:?}"),
+        ));
+    }
+    Ok((created_at, id.to_string()))
+}
+
+fn inbox(
+    conn: &mut Connection,
+    as_role: Option<&str>,
+    caller: &LazyCaller,
+    o: InboxOpts,
 ) -> Result<Option<Value>> {
     let me = me(conn, as_role, caller)?;
     touch(conn, &me.role)?;
-    if count {
+    if o.count {
         let unread = unread_count(conn, &me.role, false)?;
         return Ok(Some(json!({"ok": true, "role": me.role, "unread": unread})));
     }
     let t = now();
     let lease_until = t + lease_secs();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let cursor = o.after.as_deref().map(decode_inbox_cursor).transpose()?;
+    let after_created = cursor.as_ref().map(|(created, _)| *created);
+    let after_id = cursor.as_ref().map(|(_, id)| id.as_str());
     let available: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM deliveries
-         WHERE recipient = ?1 AND (lease_until IS NULL OR lease_until < ?2)",
-        params![me.role, t],
+        "SELECT COUNT(*) FROM deliveries d JOIN messages m ON m.id = d.message_id
+         WHERE d.recipient = ?1 AND (d.lease_until IS NULL OR d.lease_until < ?2)
+           AND (?3 IS NULL OR m.created_at > ?3 OR (m.created_at = ?3 AND m.id > ?4))",
+        params![me.role, t, after_created, after_id],
         |row| row.get(0),
     )?;
     let messages: Vec<Value> = {
@@ -948,9 +989,10 @@ fn inbox(
             "SELECT m.id, m.sender, m.kind, m.body, m.reply_to, m.hop, m.no_reply
              FROM deliveries d JOIN messages m ON m.id = d.message_id
              WHERE d.recipient = ?1 AND (d.lease_until IS NULL OR d.lease_until < ?2)
-             ORDER BY m.created_at, m.id LIMIT ?3",
+               AND (?3 IS NULL OR m.created_at > ?3 OR (m.created_at = ?3 AND m.id > ?4))
+             ORDER BY m.created_at, m.id LIMIT ?5",
         )?;
-        stmt.query_map(params![me.role, t, limit as i64], |r| {
+        stmt.query_map(params![me.role, t, after_created, after_id, o.limit as i64], |r| {
             Ok(json!({"id": r.get::<_, String>(0)?, "from": r.get::<_, String>(1)?, "kind": r.get::<_, String>(2)?,
                       "body": r.get::<_, String>(3)?, "reply_to": r.get::<_, Option<String>>(4)?,
                       "hop": r.get::<_, i64>(5)?, "no_reply": r.get::<_, bool>(6)?}))
@@ -963,7 +1005,7 @@ fn inbox(
         .collect();
     if !ids.is_empty() {
         let placeholders = vec!["?"; ids.len()].join(",");
-        let lease_sql = if peek { "NULL" } else { "?2" };
+        let lease_sql = if o.peek { "NULL" } else { "?2" };
         tx.execute(
             &format!("UPDATE deliveries SET delivered_at = COALESCE(delivered_at, ?1), lease_until = {lease_sql}
                       WHERE recipient = ?3 AND message_id IN ({placeholders})"),
@@ -975,21 +1017,35 @@ fn inbox(
             ),
         )?;
     }
+    let remaining = available.saturating_sub(messages.len() as i64);
+    let next_cursor = if o.peek && remaining > 0 {
+        let id = ids
+            .last()
+            .expect("a remaining page follows a non-empty page");
+        let created_at: f64 = tx.query_row(
+            "SELECT created_at FROM messages WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        Some(encode_inbox_cursor(created_at, id))
+    } else {
+        None
+    };
     tx.commit()?;
 
-    let remaining = available.saturating_sub(messages.len() as i64);
     let out = crate::store::attach_notes(json!({
         "ok": true,
         "role": me.role,
         "messages": messages,
         "remaining": remaining,
-        "has_more": remaining > 0
+        "has_more": remaining > 0,
+        "next_cursor": next_cursor
     }));
     let mut stdout = std::io::stdout().lock();
     let printed = writeln!(stdout, "{out}")
         .and_then(|_| stdout.flush())
         .is_ok();
-    if printed && !peek && !require_ack && !ids.is_empty() {
+    if printed && !o.peek && !o.require_ack && !ids.is_empty() {
         conn.execute(
             "DELETE FROM deliveries WHERE recipient = ?1 AND lease_until = ?2",
             params![me.role, lease_until],

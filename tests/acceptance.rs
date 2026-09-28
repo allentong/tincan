@@ -572,6 +572,53 @@ fn inbox_is_paginated_and_reports_remaining_mail() {
 }
 
 #[test]
+fn peek_uses_a_cursor_to_paginate_without_consuming_mail() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    for body in ["one", "two", "three"] {
+        assert_eq!(t.run(&["--as", "a", "send", "b", body]).0, 0);
+    }
+
+    let first = t.out(&["--as", "b", "inbox", "--peek", "--limit", "2"]);
+    assert_eq!(bodies(&first), ["one", "two"]);
+    assert_eq!(first["remaining"], 1);
+    assert_eq!(first["has_more"], true);
+    let cursor = first["next_cursor"].as_str().unwrap();
+
+    let second = t.out(&[
+        "--as", "b", "inbox", "--peek", "--limit", "2", "--after", cursor,
+    ]);
+    assert_eq!(bodies(&second), ["three"]);
+    assert_eq!(second["remaining"], 0);
+    assert_eq!(second["has_more"], false);
+    assert!(second["next_cursor"].is_null());
+
+    let count = t.out(&["--as", "b", "inbox", "--count"]);
+    assert_eq!(count["unread"], 3);
+}
+
+#[test]
+fn peek_cursor_survives_consumption_of_its_boundary_message() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    for body in ["one", "two", "three"] {
+        assert_eq!(t.run(&["--as", "a", "send", "b", body]).0, 0);
+    }
+
+    let peeked = t.out(&["--as", "b", "inbox", "--peek", "--limit", "2"]);
+    let cursor = peeked["next_cursor"].as_str().unwrap();
+    assert_eq!(bodies(&peeked), ["one", "two"]);
+
+    let consumed = t.out(&["--as", "b", "inbox", "--limit", "2"]);
+    assert_eq!(bodies(&consumed), ["one", "two"]);
+    let remainder = t.out(&["--as", "b", "inbox", "--peek", "--after", cursor]);
+    assert_eq!(bodies(&remainder), ["three"]);
+    assert_eq!(t.out(&["--as", "b", "inbox", "--count"])["unread"], 1);
+}
+
+#[test]
 fn full_mailbox_rejects_more_pending_messages() {
     let mut t = Team::new();
     t.reg("a", "claude");
@@ -2142,14 +2189,16 @@ fn launched_harness_gets_only_baseline_and_explicit_environment() {
         let (rc, sent) = t.env(&["--as", "lead", "send", name, "ping?"], &env);
         assert_eq!(rc, 0, "{sent}");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !observed.exists() {
+        loop {
+            if std::fs::read_to_string(&observed).is_ok_and(|contents| contents == expected) {
+                break;
+            }
             assert!(
                 Instant::now() < deadline,
                 "fake harness did not run: {sent}"
             );
             thread::sleep(Duration::from_millis(25));
         }
-        assert_eq!(std::fs::read_to_string(observed).unwrap(), expected);
     }
 }
 

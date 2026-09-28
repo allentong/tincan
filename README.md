@@ -107,7 +107,7 @@ Optional: `tincan register reviewer` for a custom name, `--as ROLE` / `TINCAN_RO
 
 Every command prints one JSON line and uses stable exit codes, so agents can parse the result. (`tincan hook` is the exception: it prints nothing when there's nothing to tell the agent.)
 
-`inbox` returns at most 25 messages by default (up to 100 with `--limit`) and includes `has_more` and `remaining`; call it again while `has_more` is true. Mailboxes and senders also have pending-delivery quotas so a peer cannot grow the local store without bound.
+`inbox` returns at most 25 messages by default (up to 100 with `--limit`) and includes `has_more` and `remaining`; call it again while `has_more` is true. A non-consuming `inbox --peek` also returns `next_cursor`; continue with `inbox --peek --after <next_cursor>`. Mailboxes and senders have pending-delivery quotas so a peer cannot grow the local store without bound.
 
 | Exit | Meaning |
 | --- | --- |

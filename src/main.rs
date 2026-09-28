@@ -101,6 +101,9 @@ pub enum Cmd {
         /// Maximum messages returned in one call
         #[arg(long, default_value_t = 25, value_parser = inbox_limit)]
         limit: usize,
+        /// Continue a non-consuming peek after this message id
+        #[arg(long, requires = "peek", conflicts_with = "count")]
+        after: Option<String>,
     },
     /// Mark leased messages read
     Ack { ids: Vec<String> },
