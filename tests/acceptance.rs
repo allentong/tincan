@@ -1878,12 +1878,16 @@ fn install_skills_puts_the_skill_where_harnesses_look() {
     };
     let (rc, o) = exec(None, &["install-skills"], opts);
     assert_eq!(rc, 0, "{o}");
-    for p in [
-        ".agents/skills/tincan/SKILL.md",
-        ".claude/skills/tincan/SKILL.md",
-    ] {
-        let text = std::fs::read_to_string(d.0.join(p)).unwrap();
-        assert!(text.starts_with("---\nname: tincan"), "{p}");
+    for root in [".agents/skills", ".claude/skills"] {
+        for name in ["tincan", "tincan-consult", "tincan-delegate"] {
+            let p = d.0.join(root).join(name).join("SKILL.md");
+            let text = std::fs::read_to_string(&p).unwrap();
+            assert!(
+                text.starts_with(&format!("---\nname: {name}\n")),
+                "{}",
+                p.display()
+            );
+        }
     }
     // with the Claude Code plugin installed, its own copy is used instead
     std::fs::remove_dir_all(d.0.join(".claude/skills")).unwrap();
@@ -1891,6 +1895,18 @@ fn install_skills_puts_the_skill_where_harnesses_look() {
     let (_, o) = exec(None, &["install-skills"], opts);
     assert_eq!(o["skipped"][0]["for"], "claude", "{o}");
     assert!(!d.0.join(".claude/skills/tincan").exists());
+}
+
+#[test]
+fn empty_body_is_rejected() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    for body in ["", "  \n"] {
+        let (rc, o) = t.run(&["--as", "a", "send", "b", body]);
+        assert_eq!(rc, 2, "{o}");
+    }
+    assert!(msgs(&t.out(&["--as", "b", "inbox"])).is_empty());
 }
 
 #[test]

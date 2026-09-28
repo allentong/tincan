@@ -458,6 +458,12 @@ fn send(
     } else {
         o.body
     };
+    if body.trim().is_empty() {
+        return Err(TincanError::new(
+            Code::Usage,
+            "body is empty (if you built it in a shell variable, it wasn't set); nothing was sent",
+        ));
+    }
     if body.len() > MAX_BODY {
         return Err(TincanError::new(
             Code::TooLarge,
@@ -1227,28 +1233,46 @@ fn sweep(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The skill ships inside the binary, so installing tincan is the only setup step.
-const SKILL: &str = include_str!("../skills/tincan/SKILL.md");
+/// Skills that ship in the binary: (name in the plugin, SKILL.md). Outside the plugin, recipes
+/// are installed as `tincan-<name>` so they read clearly next to other skills.
+const SKILLS: &[(&str, &str)] = &[
+    ("tincan", include_str!("../skills/tincan/SKILL.md")),
+    ("consult", include_str!("../skills/consult/SKILL.md")),
+    ("delegate", include_str!("../skills/delegate/SKILL.md")),
+];
 
-/// Writes the skill where Codex and Grok (`~/.agents/skills`) and Claude Code (`~/.claude/skills`)
-/// look for it. Skips Claude Code when the plugin, which carries its own copy, is installed.
+/// Writes the skills where Codex and Grok (`~/.agents/skills`) and Claude Code
+/// (`~/.claude/skills`) look for them. Skips Claude when the plugin carries its own copies.
 fn install_skills() -> Result<Option<Value>> {
     let home = harness::home().ok_or_else(|| TincanError::new(Code::Usage, "no home dir"))?;
     let mut installed = vec![];
     let mut skipped = vec![];
     let targets = [
-        ("codex, grok", home.join(".agents/skills/tincan")),
-        ("claude", home.join(".claude/skills/tincan")),
+        ("codex, grok", home.join(".agents/skills")),
+        ("claude", home.join(".claude/skills")),
     ];
-    for (who, dir) in targets {
+    for (who, root) in targets {
         if who == "claude" && home.join(".claude/plugins/cache/tincan").is_dir() {
             skipped.push(json!({"for": who, "reason": "the tincan plugin is installed"}));
             continue;
         }
-        std::fs::create_dir_all(&dir)
-            .and_then(|_| std::fs::write(dir.join("SKILL.md"), SKILL))
-            .map_err(|e| TincanError::new(Code::Usage, format!("{}: {e}", dir.display())))?;
-        installed.push(json!({"for": who, "path": dir.join("SKILL.md")}));
+        for (name, text) in SKILLS {
+            let installed_name = if *name == "tincan" {
+                name.to_string()
+            } else {
+                format!("tincan-{name}")
+            };
+            let text = text.replacen(
+                &format!("\nname: {name}\n"),
+                &format!("\nname: {installed_name}\n"),
+                1,
+            );
+            let dir = root.join(&installed_name);
+            std::fs::create_dir_all(&dir)
+                .and_then(|_| std::fs::write(dir.join("SKILL.md"), text))
+                .map_err(|e| TincanError::new(Code::Usage, format!("{}: {e}", dir.display())))?;
+            installed.push(json!({"for": who, "path": dir.join("SKILL.md")}));
+        }
     }
     Ok(Some(
         json!({"ok": true, "installed": installed, "skipped": skipped}),
