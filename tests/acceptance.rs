@@ -1331,6 +1331,42 @@ fn wait_replies_stops_for_ended_session() {
 }
 
 #[test]
+fn wait_replies_allows_a_final_reply_during_exit_settlement() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let px = t.reg("x", "codex");
+    let mid = id(&t.out(&["--as", "lead", "send", "x", "q?"]));
+    t.kill(px);
+    let o = thread::scope(|s| {
+        let t = &t;
+        let mid = &mid;
+        s.spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            t.run(&[
+                "--as",
+                "x",
+                "send",
+                "lead",
+                "last answer",
+                "--reply-to",
+                mid,
+            ]);
+        });
+        t.out(&[
+            "--as",
+            "lead",
+            "wait",
+            "--replies-to",
+            mid,
+            "--timeout",
+            "10",
+        ])
+    });
+    assert_eq!(strs(&o["replied"]), ["x"], "{o}");
+    assert_eq!(o["ended"], json!([]), "{o}");
+}
+
+#[test]
 fn wait_replies_times_out_with_stragglers() {
     let mut t = Team::new();
     t.reg("lead", "claude");

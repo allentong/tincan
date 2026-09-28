@@ -14,6 +14,7 @@ pub const MAX_HOPS: i64 = 8;
 pub const MAX_PENDING_PER_RECIPIENT: i64 = 512;
 pub const MAX_PENDING_PER_SENDER: i64 = 1024;
 const WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+const EXIT_SETTLEMENT: std::time::Duration = std::time::Duration::from_millis(500);
 
 fn env_secs(name: &str, default: f64) -> f64 {
     std::env::var(name)
@@ -1140,6 +1141,7 @@ fn wait_replies(
     }
     let recipients: Vec<String> = serde_json::from_str(&recipients).unwrap_or_default();
     let deadline = now() + timeout;
+    let mut inactive_since = std::collections::HashMap::new();
     loop {
         let all_peers: Vec<Peer> = conn
             .prepare(&format!("SELECT {PEER_COLS} FROM peers"))?
@@ -1156,12 +1158,29 @@ fn wait_replies(
             .collect::<rusqlite::Result<_>>()?;
         let replied_set: std::collections::HashSet<&str> =
             replied.iter().map(String::as_str).collect();
+        let checked_at = std::time::Instant::now();
         let deadline_reached = now() >= deadline;
-        let (waiting, ended): (Vec<String>, Vec<String>) = recipients
+        let mut waiting = vec![];
+        let mut ended = vec![];
+        for recipient in recipients
             .iter()
             .filter(|recipient| !replied_set.contains(recipient.as_str()))
-            .cloned()
-            .partition(|recipient| alive.contains(recipient));
+        {
+            if alive.contains(recipient) {
+                inactive_since.remove(recipient);
+                waiting.push(recipient.clone());
+                continue;
+            }
+
+            let since = inactive_since
+                .entry(recipient.clone())
+                .or_insert(checked_at);
+            if deadline_reached || checked_at.duration_since(*since) >= EXIT_SETTLEMENT {
+                ended.push(recipient.clone());
+            } else {
+                waiting.push(recipient.clone());
+            }
+        }
         if waiting.is_empty() || deadline_reached {
             touch(conn, &me.role)?;
             return Ok(Some(
