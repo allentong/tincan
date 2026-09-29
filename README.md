@@ -76,7 +76,7 @@ Install once (one command, above), then just ask an agent: "message codex and as
 There is no setup step. The first time a session uses tincan (or starts, if hooks are installed):
 
 - **Team:** `.tincan/` is created at the git repo root, git-ignored and owner-only. Every session in the repo, including its worktrees, shares it. Each peer also records its actual workspace, and a headless helper starts in the sender's worktree rather than the shared main checkout. Outside a repo, sessions share a per-user default team (`~/.local/share/tincan/default`; Windows `%LOCALAPPDATA%\tincan\default`) while helpers start in the sender's working directory.
-- **Name:** the session registers under its harness name, `claude`, `codex` or `grok`. A second live Claude session gets `claude-2`.
+- **Name:** the session registers under its harness name, `claude`, `codex` or `grok`. A second live Claude session gets `claude-2`. When an outermost PID-bound session auto-registers with a unique supported terminal target such as tmux or cmux, it also records that pane or surface so new mail can wake the idle session. Nested agents never claim the outer harness's terminal.
 - **Confirmation:** the command's output carries a `setup` field saying what was created and the name taken, and the skill tells the agent to relay it to you.
 
 ```sh
@@ -155,7 +155,7 @@ An agent sitting idle won't check its inbox on its own. Pick what fits each sess
 | --- | --- | --- |
 | Hooks | Claude Code, Codex, Grok | Included in the Claude Code plugin. Otherwise `tincan hooks --harness claude` (or `codex`) prints the config and the file to merge it into. The Stop hook blocks once per new message; `--linger 120` keeps an agent alive for replies to its own questions. |
 | Background wait | Claude Code | Run `tincan wait --timeout 3600` as a background task. It exits when mail lands. |
-| Terminal nudge | Any TUI in tmux, cmux, herdr, … | `tincan register ROLE --wake auto`. Senders type a short nudge into the idle pane, never over a running turn. |
+| Terminal nudge | Any TUI in tmux, cmux, herdr, … | Outermost PID-bound auto-registered sessions detect a unique supported terminal target. For a custom role, use `tincan register ROLE --wake auto`; explicit registration defaults to no wake, so pass `--wake auto` to retain it or `--wake none` to opt out. Senders type a short nudge into the pane; drivers with screen detection avoid interrupting a running turn. |
 | Anything else | Scripts, notifiers | `--wake cmd:'<shell>'` runs with `TINCAN_WAKE_ROLE`, `TINCAN_WAKE_UNREAD`, `TINCAN_WAKE_TEXT`. |
 
 Codex runs project hooks only after you trust them in `/hooks`. Grok runs project hooks (`tincan hooks --harness grok` → `.grok/hooks/tincan.json`) only in a trusted folder (`/hooks-trust` or `grok --trust`) that is a git repository.

@@ -13,6 +13,8 @@ pub struct Caller {
     pub owner_pid: Option<i64>,
     pub harness: Option<Profile>,
     pub session_key: Option<String>,
+    /// Another harness owns an ancestor process, so this session must not claim its terminal.
+    pub nested_harness: bool,
 }
 
 /// Detects the caller on first use only: `--as`/TINCAN_ROLE calls never walk the process tree.
@@ -44,7 +46,7 @@ impl LazyCaller {
 
 impl Caller {
     pub fn detect() -> Self {
-        let (owner_pid, harness) = find_harness(&harness::load());
+        let (owner_pid, harness, nested_harness) = find_harness(&harness::load());
         // TINCAN_OWNER_PID=0 opts out of detection entirely (a plain shell inside an agent session).
         let plain = std::env::var("TINCAN_OWNER_PID").is_ok_and(|p| p == "0");
         let session_key = std::env::var("TINCAN_SESSION").ok().or_else(|| {
@@ -57,13 +59,14 @@ impl Caller {
             owner_pid,
             harness,
             session_key,
+            nested_harness,
         }
     }
 }
 
 /// Nearest harness ancestor. The process walk beats env vars because harnesses nest
 /// (Claude launching Codex) and children inherit the parent's session vars.
-fn find_harness(profiles: &[Profile]) -> (Option<i64>, Option<Profile>) {
+fn find_harness(profiles: &[Profile]) -> (Option<i64>, Option<Profile>, bool) {
     let marked = || {
         profiles
             .iter()
@@ -76,9 +79,10 @@ fn find_harness(profiles: &[Profile]) -> (Option<i64>, Option<Profile>) {
         .ok()
         .and_then(|p| p.parse().ok())
     {
-        return ((pid > 0).then_some(pid), marked());
+        return ((pid > 0).then_some(pid), marked(), false);
     }
     let mut pid = parent_pid();
+    let mut ancestors = vec![];
     for _ in 0..20 {
         if pid <= 1 {
             break;
@@ -86,16 +90,32 @@ fn find_harness(profiles: &[Profile]) -> (Option<i64>, Option<Profile>) {
         let Some((ppid, comm)) = proc_parent(pid) else {
             break;
         };
-        if let Some(p) = profiles
-            .iter()
-            .find(|p| p.process_names.iter().any(|n| matches_harness(&comm, n)))
-        {
-            return (Some(pid), Some(p.clone()));
-        }
+        ancestors.push((pid, comm));
         pid = ppid;
     }
+    let found = match_harness_ancestry(profiles, &ancestors);
+    if found.1.is_some() {
+        return found;
+    }
     // Sandboxed harnesses (Codex seatbelt) hide the process tree: fall back to env markers.
-    (None, marked())
+    (None, marked(), false)
+}
+
+/// Pick the nearest harness and report whether another harness owns an outer ancestor.
+fn match_harness_ancestry(
+    profiles: &[Profile],
+    ancestors: &[(i64, String)],
+) -> (Option<i64>, Option<Profile>, bool) {
+    let mut matches = ancestors.iter().filter_map(|(pid, comm)| {
+        profiles
+            .iter()
+            .find(|p| p.process_names.iter().any(|n| matches_harness(comm, n)))
+            .map(|p| (*pid, p.clone()))
+    });
+    let Some((pid, profile)) = matches.next() else {
+        return (None, None, false);
+    };
+    (Some(pid), Some(profile), matches.next().is_some())
 }
 
 /// (parent pid, executable path) straight from the kernel: no `ps` fork per ancestor.
@@ -454,18 +474,41 @@ fn auto_register(
     tx.execute("DELETE FROM deliveries WHERE recipient = ?1", [&role])?;
     let t = now();
     let workspace = crate::store::resolve_workspace()?;
+    // Auto-registration is the zero-setup path for interactive harnesses. A PID-bound session in
+    // a supported terminal can be woken after its last hook returns. Never bind heartbeat-only
+    // callers, whose pane may return to a shell while their registration is still alive, or reuse
+    // a target held by another active peer (nested harnesses inherit the outer pane's env).
+    let detected_wake = c
+        .owner_pid
+        .filter(|_| !c.nested_harness)
+        .and_then(|_| crate::wake::resolve("auto").ok().flatten());
+    let wake = match detected_wake {
+        Some(spec) => {
+            let target_in_use = {
+                let mut stmt =
+                    tx.prepare(&format!("SELECT {PEER_COLS} FROM peers WHERE wake = ?1"))?;
+                stmt.query_map([&spec], peer_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .iter()
+                    .any(|p| p.state() == PeerState::Active)
+            };
+            (!target_in_use).then_some(spec)
+        }
+        None => None,
+    };
     tx.execute(
         "INSERT INTO peers(role, harness, session_key, pid, registered_at, last_seen, status, wake, workspace)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'active', NULL, ?6)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'active', ?6, ?7)
          ON CONFLICT(role) DO UPDATE SET harness = excluded.harness, session_key = excluded.session_key,
            pid = excluded.pid, registered_at = excluded.registered_at, last_seen = excluded.last_seen,
-           status = 'active', wake = NULL, workspace = excluded.workspace",
+           status = 'active', wake = excluded.wake, workspace = excluded.workspace",
         params![
             role,
             harness,
             c.session_key,
             c.owner_pid,
             t,
+            wake,
             workspace.to_string_lossy()
         ],
     )?;
@@ -477,7 +520,8 @@ fn auto_register(
 
 #[cfg(test)]
 mod tests {
-    use super::matches_harness;
+    use super::{match_harness_ancestry, matches_harness};
+    use crate::harness;
 
     #[test]
     fn harness_matched_by_name_or_versioned_dir() {
@@ -505,5 +549,28 @@ mod tests {
             "claude"
         ));
         assert!(!matches_harness(r"C:\Users\a\claude\python.exe", "claude"));
+    }
+
+    #[test]
+    fn nested_harness_does_not_own_the_outer_harness_terminal() {
+        let profiles = harness::builtins();
+        let ancestry = vec![
+            (30, "/opt/homebrew/bin/codex".to_string()),
+            (20, "/bin/zsh".to_string()),
+            (
+                10,
+                "/Users/a/.local/share/claude/versions/2.1.284".to_string(),
+            ),
+        ];
+        let (pid, profile, nested) = match_harness_ancestry(&profiles, &ancestry);
+        assert_eq!(pid, Some(30));
+        assert_eq!(profile.unwrap().name, "codex");
+        assert!(nested);
+
+        let outer_only = vec![(10, ancestry[2].1.clone())];
+        let (pid, profile, nested) = match_harness_ancestry(&profiles, &outer_only);
+        assert_eq!(pid, Some(10));
+        assert_eq!(profile.unwrap().name, "claude");
+        assert!(!nested);
     }
 }

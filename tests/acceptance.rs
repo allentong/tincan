@@ -1696,6 +1696,119 @@ fn agent_session_auto_registers_as_harness_name() {
 }
 
 #[test]
+fn auto_registered_second_session_can_be_woken_when_idle() {
+    let mut t = Team::new();
+    let drivers = t.write(
+        "drivers.json",
+        &json!([{
+            "name": "faketerm",
+            "detect_env": "FAKETERM_PANE",
+            "nudge": [if cfg!(windows) {
+                json!(["cmd", "/D", "/C", "exit", "0"])
+            } else {
+                json!(["true"])
+            }]
+        }])
+        .to_string(),
+    );
+    t.reg("sender", "codex");
+    let (a, b) = (t.owner().to_string(), t.owner().to_string());
+    let env_a = [
+        ("TINCAN_OWNER_PID", a.as_str()),
+        ("CLAUDE_CODE_SESSION_ID", a.as_str()),
+        ("CLAUDECODE", "1"),
+        ("TINCAN_DRIVERS", drivers.as_str()),
+        ("FAKETERM_PANE", "surface-8"),
+    ];
+    let env_b = [
+        ("TINCAN_OWNER_PID", b.as_str()),
+        ("CLAUDE_CODE_SESSION_ID", b.as_str()),
+        ("CLAUDECODE", "1"),
+        ("TINCAN_DRIVERS", drivers.as_str()),
+        ("FAKETERM_PANE", "surface-9"),
+    ];
+
+    t.env(&["whoami"], &env_a);
+    let (_, o) = t.env(&["whoami"], &env_b);
+    assert_eq!(o["role"], "claude-2", "{o}");
+    assert_eq!(
+        t.db_strings("SELECT wake FROM peers WHERE role = 'claude-2'"),
+        ["faketerm:surface-9"]
+    );
+
+    let (_, o) = t.env(
+        &["--as", "sender", "send", "claude-2", "check in"],
+        &[("TINCAN_DRIVERS", drivers.as_str())],
+    );
+    assert_eq!(o["wake"], json!({"claude-2": "nudged"}), "{o}");
+}
+
+#[test]
+fn auto_registration_does_not_reuse_an_active_peers_wake_target() {
+    let mut t = Team::new();
+    let (a, b) = (t.owner().to_string(), t.owner().to_string());
+    let env_a = [
+        ("TINCAN_OWNER_PID", a.as_str()),
+        ("CLAUDE_CODE_SESSION_ID", a.as_str()),
+        ("CLAUDECODE", "1"),
+        ("TMUX_PANE", "%7"),
+    ];
+    let env_b = [
+        ("TINCAN_OWNER_PID", b.as_str()),
+        ("CLAUDE_CODE_SESSION_ID", b.as_str()),
+        ("CLAUDECODE", "1"),
+        ("TMUX_PANE", "%7"),
+    ];
+
+    t.env(&["whoami"], &env_a);
+    t.env(&["whoami"], &env_b);
+    assert_eq!(
+        t.db_strings("SELECT COALESCE(wake, '') FROM peers ORDER BY role"),
+        ["tmux:%7", ""]
+    );
+}
+
+#[test]
+fn heartbeat_only_auto_registration_does_not_bind_a_terminal() {
+    let t = Team::new();
+    let env = [
+        // A non-positive explicit owner models a sandboxed harness whose owner PID is hidden;
+        // unlike 0, -1 does not opt out of marker/session detection.
+        ("TINCAN_OWNER_PID", "-1"),
+        ("CLAUDE_CODE_SESSION_ID", "sandboxed"),
+        ("CLAUDECODE", "1"),
+        ("TMUX_PANE", "%7"),
+    ];
+
+    let (rc, o) = t.env(&["whoami"], &env);
+    assert_eq!((rc, o["role"].as_str()), (0, Some("claude")), "{o}");
+    assert_eq!(
+        t.db_strings("SELECT COALESCE(wake, '') FROM peers WHERE role = 'claude'"),
+        [""]
+    );
+}
+
+#[test]
+fn explicit_registration_can_clear_an_auto_detected_wake() {
+    let mut t = Team::new();
+    let p = t.owner().to_string();
+    let env = [
+        ("TINCAN_OWNER_PID", p.as_str()),
+        ("CLAUDE_CODE_SESSION_ID", p.as_str()),
+        ("CLAUDECODE", "1"),
+        ("TMUX_PANE", "%7"),
+    ];
+
+    t.env(&["whoami"], &env);
+    let (rc, o) = t.env(&["register", "claude", "--wake", "none"], &env);
+    assert_eq!(rc, 0, "{o}");
+    assert_eq!(
+        t.db_strings("SELECT COALESCE(wake, '') FROM peers WHERE role = 'claude'"),
+        [""]
+    );
+}
+
+#[test]
 fn renaming_an_auto_registered_session_keeps_one_role() {
     let mut t = Team::new();
     let p = t.owner().to_string();
