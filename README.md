@@ -127,6 +127,11 @@ Every command prints one JSON line and uses stable exit codes, so agents can par
 
 `tincan install-skills` (run by the install steps above) puts the skill in `~/.claude/skills` for Claude Code and `~/.agents/skills` for Codex and Grok. With the Claude Code plugin installed, Claude uses the plugin's copy instead.
 
+**Recipes.** Two more skills ship with it (in Claude Code with the plugin, `/tincan:consult` and `/tincan:delegate`; elsewhere `tincan-consult` and `tincan-delegate`):
+
+- **consult:** get a read-only second opinion from another agent on a question, or have it challenge your current changes with a ship/don't-ship verdict and file:line findings.
+- **delegate:** hand a task to another agent and direct it until it's done. It works in your checkout, including a worktree, asks questions over tincan, and reports back for verification.
+
 **Optional, Claude Code plugin:** adds hooks that tell a session when mail arrives, without it having to check. It carries its own copy of the skill.
 
 ```
