@@ -29,9 +29,6 @@ fn clean_command() -> Command {
     }
     // Not an agent session unless a test says so, so nothing auto-registers by accident.
     cmd.env("TINCAN_OWNER_PID", "0");
-    // Act like a launched session, which never launches, so mail to a missing `codex` can't
-    // start the real one. Launch tests clear it.
-    cmd.env("TINCAN_LAUNCHED", "1");
     // A throwaway home, so the per-user default team and config never touch the real one.
     let home = std::env::temp_dir().join(format!("tincan-home-{}", std::process::id()));
     cmd.env("HOME", &home)
@@ -135,7 +132,23 @@ impl Team {
     }
 
     fn with(&self, args: &[&str], o: Opts) -> (i32, Value) {
-        exec(Some(&self.dir), args, o)
+        let mut args = args.to_vec();
+        let explicit_launch_test = o
+            .env
+            .iter()
+            .rev()
+            .find(|(key, _)| *key == "TINCAN_LAUNCHED")
+            .is_some_and(|(_, value)| value.is_empty());
+        if args.contains(&"send")
+            && !explicit_launch_test
+            && !args.contains(&"--no-launch")
+            && !args.contains(&"--new")
+        {
+            // Most acceptance tests exercise an already-registered team. Keep them hermetic and
+            // make the no-launch behavior explicit; launch tests opt in with an empty marker.
+            args.push("--no-launch");
+        }
+        exec(Some(&self.dir), &args, o)
     }
 
     fn run(&self, args: &[&str]) -> (i32, Value) {
@@ -287,6 +300,93 @@ fn ac1_ac2_dm_both_directions() {
 }
 
 #[test]
+fn reply_resolves_sender_and_rejects_spoofed_threads() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    t.reg("mallory", "grok");
+    let mid = id(&t.out(&["--as", "a", "send", "b", "question?"]));
+
+    let body = "literal $HOME $(touch nope) `whoami` \"quotes\"\nand newline";
+    let (rc, reply) = t.with(
+        &["--as", "b", "reply", &mid, "-"],
+        Opts {
+            stdin: Some(body),
+            ..Opts::default()
+        },
+    );
+    assert_eq!((rc, reply["hop"].as_i64()), (0, Some(1)), "{reply}");
+    let inbox = t.out(&["--as", "a", "inbox"]);
+    assert_eq!(bodies(&inbox), [body]);
+    assert_eq!(msgs(&inbox)[0]["reply_to"], mid.as_str());
+
+    let (rc, o) = t.run(&["--as", "mallory", "reply", &mid, "spoof"]);
+    assert_eq!((rc, o["error"].as_str()), (2, Some("usage")), "{o}");
+    let (rc, o) = t.run(&[
+        "--as",
+        "b",
+        "send",
+        "mallory",
+        "misdirected",
+        "--reply-to",
+        &mid,
+    ]);
+    assert_eq!((rc, o["error"].as_str()), (2, Some("usage")), "{o}");
+}
+
+#[test]
+fn launched_sessions_are_confined_to_their_assigned_identity_and_protocol() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    t.reg("helper", "codex");
+    let team = t.dir.to_string_lossy().into_owned();
+    let launched = [
+        ("TINCAN_TEAM_DIR", team.as_str()),
+        ("TINCAN_ROLE", "helper"),
+        ("TINCAN_LAUNCHED", "1"),
+    ];
+    let run = |args: &[&str]| {
+        exec(
+            None,
+            args,
+            Opts {
+                env: &launched,
+                ..Opts::default()
+            },
+        )
+    };
+
+    assert_eq!(run(&["inbox", "--count"]).0, 0);
+    assert_eq!(run(&["send", "lead", "hello"]).0, 0);
+    for args in [
+        vec!["init"],
+        vec!["register", "attacker", "--wake", "cmd:echo nope"],
+        vec!["hooks", "--harness", "claude"],
+        vec!["extensions"],
+        vec!["install-skills"],
+        vec!["send", "codex", "fan out", "--new"],
+    ] {
+        let (rc, o) = run(&args);
+        assert_eq!(
+            (rc, o["error"].as_str()),
+            (2, Some("usage")),
+            "{args:?}: {o}"
+        );
+    }
+    let (rc, o) = run(&["--as", "lead", "inbox"]);
+    assert_eq!((rc, o["error"].as_str()), (2, Some("usage")), "{o}");
+    let (rc, o) = exec(
+        None,
+        &["--team-dir", &team, "inbox"],
+        Opts {
+            env: &launched,
+            ..Opts::default()
+        },
+    );
+    assert_eq!((rc, o["error"].as_str()), (2, Some("usage")), "{o}");
+}
+
+#[test]
 fn ac3_stale_peer_does_not_black_hole() {
     let mut t = Team::new();
     t.reg("claude", "claude");
@@ -371,8 +471,8 @@ fn ac4_concurrent_sends_consistent() {
     );
     // pending mail survives the senders exiting; each side gets exactly its half, no dupes
     t.kill_all();
-    let g = t.out(&["--as", "grok", "inbox"]);
-    let c = t.out(&["--as", "claude", "inbox"]);
+    let g = t.out(&["--as", "grok", "inbox", "--limit", "100"]);
+    let c = t.out(&["--as", "claude", "inbox", "--limit", "100"]);
     assert_eq!((msgs(&g).len(), msgs(&c).len()), (N / 2, N / 2));
     let mut all: Vec<&str> = ids(&g).into_iter().chain(ids(&c)).collect();
     all.sort();
@@ -454,6 +554,91 @@ fn large_payload_rejected() {
 }
 
 #[test]
+fn inbox_is_paginated_and_reports_remaining_mail() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    for body in ["one", "two", "three"] {
+        assert_eq!(t.run(&["--as", "a", "send", "b", body]).0, 0);
+    }
+    let first = t.out(&["--as", "b", "inbox", "--limit", "2"]);
+    assert_eq!(bodies(&first), ["one", "two"]);
+    assert_eq!(first["remaining"], 1);
+    assert_eq!(first["has_more"], true);
+    let second = t.out(&["--as", "b", "inbox", "--limit", "2"]);
+    assert_eq!(bodies(&second), ["three"]);
+    assert_eq!(second["remaining"], 0);
+    assert_eq!(second["has_more"], false);
+}
+
+#[test]
+fn peek_uses_a_cursor_to_paginate_without_consuming_mail() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    for body in ["one", "two", "three"] {
+        assert_eq!(t.run(&["--as", "a", "send", "b", body]).0, 0);
+    }
+
+    let first = t.out(&["--as", "b", "inbox", "--peek", "--limit", "2"]);
+    assert_eq!(bodies(&first), ["one", "two"]);
+    assert_eq!(first["remaining"], 1);
+    assert_eq!(first["has_more"], true);
+    let cursor = first["next_cursor"].as_str().unwrap();
+
+    let second = t.out(&[
+        "--as", "b", "inbox", "--peek", "--limit", "2", "--after", cursor,
+    ]);
+    assert_eq!(bodies(&second), ["three"]);
+    assert_eq!(second["remaining"], 0);
+    assert_eq!(second["has_more"], false);
+    assert!(second["next_cursor"].is_null());
+
+    let count = t.out(&["--as", "b", "inbox", "--count"]);
+    assert_eq!(count["unread"], 3);
+}
+
+#[test]
+fn peek_cursor_survives_consumption_of_its_boundary_message() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    for body in ["one", "two", "three"] {
+        assert_eq!(t.run(&["--as", "a", "send", "b", body]).0, 0);
+    }
+
+    let peeked = t.out(&["--as", "b", "inbox", "--peek", "--limit", "2"]);
+    let cursor = peeked["next_cursor"].as_str().unwrap();
+    assert_eq!(bodies(&peeked), ["one", "two"]);
+
+    let consumed = t.out(&["--as", "b", "inbox", "--limit", "2"]);
+    assert_eq!(bodies(&consumed), ["one", "two"]);
+    let remainder = t.out(&["--as", "b", "inbox", "--peek", "--after", cursor]);
+    assert_eq!(bodies(&remainder), ["three"]);
+    assert_eq!(t.out(&["--as", "b", "inbox", "--count"])["unread"], 1);
+}
+
+#[test]
+fn full_mailbox_rejects_more_pending_messages() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    t.db()
+        .execute_batch(
+            "WITH RECURSIVE seq(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM seq WHERE x < 512)
+             INSERT INTO messages(id, sender, kind, body, created_at, recipients)
+             SELECT printf('quota-%04d', x), 'a', 'dm', 'x', x, '[\"b\"]' FROM seq;
+             INSERT INTO deliveries(message_id, recipient)
+             SELECT id, 'b' FROM messages WHERE id LIKE 'quota-%';",
+        )
+        .unwrap();
+    let (rc, o) = t.run(&["--as", "a", "send", "b", "one too many"]);
+    assert_eq!((rc, o["error"].as_str()), (9, Some("mailbox_full")), "{o}");
+    assert_eq!(o["recipient"], "b");
+    assert_eq!(o["pending"], 512);
+}
+
+#[test]
 fn send_to_self_rejected_with_sender_hint() {
     let mut t = Team::new();
     t.reg("a", "claude");
@@ -476,7 +661,7 @@ fn reply_loop_capped() {
         assert_eq!(rc, 0, "{o}");
         mid = id(&o);
     }
-    let (rc, o) = t.run(&["--as", "a", "send", "b", "loop", "--reply-to", &mid]);
+    let (rc, o) = t.run(&["--as", "b", "send", "a", "loop", "--reply-to", &mid]);
     assert_eq!((rc, o["error"].as_str()), (7, Some("hop_limit")));
 }
 
@@ -484,13 +669,14 @@ fn reply_loop_capped() {
 fn identity_inferred_from_session_env() {
     let mut t = Team::new();
     let p = t.owner();
+    let p = p.to_string();
     // CLAUDECODE marks the harness when no claude process is an ancestor (CI).
     let env = [
         ("CLAUDE_CODE_SESSION_ID", "sess-1"),
         ("CLAUDECODE", "1"),
-        ("TINCAN_OWNER_PID", ""),
+        ("TINCAN_OWNER_PID", p.as_str()),
     ];
-    t.env(&["register", "claude", "--pid", &p.to_string()], &env);
+    t.env(&["register", "claude", "--pid", &p], &env);
     let (rc, o) = t.env(&["whoami"], &env);
     assert_eq!((rc, o["role"].as_str()), (0, Some("claude")));
     let (rc, o) = t.run(&["whoami"]);
@@ -838,9 +1024,16 @@ fn launched_session_stops_without_lingering() {
     // b's answer is itself an unanswered DM, but a quick session ends right after answering
     t.run(&["--as", "b", "send", "a", "answer"]);
     let start = Instant::now();
-    let (rc, o) = t.with(
-        &["--as", "b", "hook", "--event", "Stop", "--linger", "10"],
+    let team = t.dir.to_string_lossy().into_owned();
+    let (rc, o) = exec(
+        None,
+        &["hook", "--event", "Stop", "--linger", "10"],
         Opts {
+            env: &[
+                ("TINCAN_TEAM_DIR", team.as_str()),
+                ("TINCAN_ROLE", "b"),
+                ("TINCAN_LAUNCHED", "1"),
+            ],
             stdin: Some(r#"{"hook_event_name":"Stop"}"#),
             ..Opts::default()
         },
@@ -909,6 +1102,13 @@ fn hooks_config_per_harness() {
     let (_, o) = exec(None, &["hooks", "--harness", "codex"], Opts::default());
     assert_eq!(o["file"], ".codex/hooks.json");
     assert!(o["config"]["hooks"].get("Stop").is_some());
+    let command = o["config"]["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        command.starts_with("PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\""),
+        "{command}"
+    );
     let (_, o) = exec(None, &["hooks", "--harness", "grok"], Opts::default());
     assert_eq!(o["file"], ".grok/hooks/tincan.json");
     // A harness without command hooks is told to use a wake driver or `wait` instead.
@@ -1131,6 +1331,42 @@ fn wait_replies_stops_for_ended_session() {
 }
 
 #[test]
+fn wait_replies_allows_a_final_reply_during_exit_settlement() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let px = t.reg("x", "codex");
+    let mid = id(&t.out(&["--as", "lead", "send", "x", "q?"]));
+    t.kill(px);
+    let o = thread::scope(|s| {
+        let t = &t;
+        let mid = &mid;
+        s.spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            t.run(&[
+                "--as",
+                "x",
+                "send",
+                "lead",
+                "last answer",
+                "--reply-to",
+                mid,
+            ]);
+        });
+        t.out(&[
+            "--as",
+            "lead",
+            "wait",
+            "--replies-to",
+            mid,
+            "--timeout",
+            "10",
+        ])
+    });
+    assert_eq!(strs(&o["replied"]), ["x"], "{o}");
+    assert_eq!(o["ended"], json!([]), "{o}");
+}
+
+#[test]
 fn wait_replies_times_out_with_stragglers() {
     let mut t = Team::new();
     t.reg("lead", "claude");
@@ -1251,6 +1487,30 @@ fn broken_driver_file_keeps_builtins() {
     t.reg("a", "claude");
     t.reg("b", "codex");
     assert_eq!(t.env(&["--as", "a", "send", "b", "x"], &env).0, 0);
+}
+
+#[test]
+fn broken_harness_file_is_reported_without_losing_builtins() {
+    let t = Team::new();
+    let harnesses = t.write("harnesses.json", r#"[{"name":"good"},{"launch":"bad"}]"#);
+    let (_, o) = exec(
+        None,
+        &["extensions"],
+        Opts {
+            env: &[("TINCAN_HARNESSES", harnesses.as_str())],
+            ..Opts::default()
+        },
+    );
+    assert_eq!(o["ok"], false, "{o}");
+    let names: Vec<&str> = o["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"good"), "{o}");
+    assert!(names.contains(&"claude"), "{o}");
+    assert!(o["errors"][0].as_str().unwrap().contains("name"), "{o}");
 }
 
 #[test]
@@ -1389,6 +1649,32 @@ fn team_outside_any_repo_uses_per_user_default() {
 }
 
 #[test]
+fn first_inbox_reports_team_and_registration_setup() {
+    let d = TmpDir::new();
+    std::fs::create_dir_all(d.0.join(".git")).unwrap();
+    let mut owner = sleeper().spawn().unwrap();
+    let pid = owner.id().to_string();
+    let (rc, inbox) = exec(
+        None,
+        &["inbox"],
+        Opts {
+            env: &agent_env(&pid),
+            cwd: Some(&d.0),
+            ..Opts::default()
+        },
+    );
+    let _ = owner.kill();
+    let _ = owner.wait();
+    assert_eq!(rc, 0, "{inbox}");
+    let setup = inbox["setup"].as_str().unwrap();
+    assert!(setup.contains("Created team"), "{inbox}");
+    assert!(
+        setup.contains("Registered this session as 'claude'"),
+        "{inbox}"
+    );
+}
+
+#[test]
 fn agent_session_auto_registers_as_harness_name() {
     let mut t = Team::new();
     let (a, b) = (t.owner().to_string(), t.owner().to_string());
@@ -1399,6 +1685,8 @@ fn agent_session_auto_registers_as_harness_name() {
     // a second live claude session gets the next free name
     let (_, o) = t.env(&["peers"], &agent_env(&b));
     assert!(o["setup"].as_str().unwrap().contains("'claude-2'"), "{o}");
+    assert_eq!(o["registered"], true, "{o}");
+    assert_eq!(o["self"]["role"], "claude-2", "{o}");
     assert_eq!(roles(&o), ["claude", "claude-2"]);
     // and can message the first with no setup at all
     let (rc, o) = t.env(&["send", "claude", "hi"], &agent_env(&b));
@@ -1429,7 +1717,10 @@ fn plain_shell_is_not_auto_registered() {
     let t = Team::new();
     let (rc, o) = t.run(&["whoami"]);
     assert_eq!((rc, o["error"].as_str()), (6, Some("not_registered")));
-    assert_eq!(roles(&t.out(&["peers"])).len(), 0);
+    let peers = t.out(&["peers"]);
+    assert_eq!(roles(&peers).len(), 0);
+    assert_eq!(peers["registered"], false, "{peers}");
+    assert!(peers["self"].is_null(), "{peers}");
 }
 
 #[test]
@@ -1493,6 +1784,69 @@ fn init_without_team_dir_initialises_cwd() {
         assert_eq!(mode & 0o777, 0o700);
     }
     assert_eq!(exec(None, &["peers"], opts).0, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn team_store_rejects_symlinks_and_repairs_private_permissions() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let root = TmpDir::new();
+    let target = root.0.join("elsewhere");
+    let linked_team = root.0.join("linked-team");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir_all(&linked_team).unwrap();
+    symlink(&target, linked_team.join(".tincan")).unwrap();
+    let (rc, o) = exec(Some(&linked_team), &["init"], Opts::default());
+    assert_eq!((rc, o["error"].as_str()), (2, Some("no_team")), "{o}");
+    assert!(!target.join("tincan.db").exists());
+
+    let linked_db_team = root.0.join("linked-db-team");
+    let linked_db_store = linked_db_team.join(".tincan");
+    let db_victim = root.0.join("db-victim.txt");
+    std::fs::create_dir_all(&linked_db_store).unwrap();
+    std::fs::write(&db_victim, "not a database").unwrap();
+    symlink(&db_victim, linked_db_store.join("tincan.db")).unwrap();
+    let (rc, o) = exec(Some(&linked_db_team), &["init"], Opts::default());
+    assert_eq!((rc, o["error"].as_str()), (10, Some("store")), "{o}");
+    assert_eq!(
+        std::fs::read_to_string(db_victim).unwrap(),
+        "not a database"
+    );
+
+    let private_team = root.0.join("private-team");
+    let store = private_team.join(".tincan");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(exec(Some(&private_team), &["init"], Opts::default()).0, 0);
+    let dir_mode = std::fs::metadata(&store).unwrap().permissions().mode() & 0o777;
+    let db_mode = std::fs::metadata(store.join("tincan.db"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!((dir_mode, db_mode), (0o700, 0o600));
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_log_refuses_a_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let victim = t.path("victim.txt");
+    std::fs::write(&victim, "keep me").unwrap();
+    symlink(&victim, t.path(".tincan/launch-fake.log")).unwrap();
+    let h = fake_harness(&t, &[BIN, "whoami"]);
+    let env = [("TINCAN_HARNESSES", h.as_str()), ("TINCAN_LAUNCHED", "")];
+    let (rc, o) = t.env(&["--as", "lead", "send", "fake", "x"], &env);
+    assert_eq!(
+        (rc, o["error"].as_str()),
+        (3, Some("peer_unavailable")),
+        "{o}"
+    );
+    assert_eq!(std::fs::read_to_string(victim).unwrap(), "keep me");
 }
 
 #[test]
@@ -1577,6 +1931,177 @@ fn fake_harness(t: &Team, launch: &[&str]) -> String {
     path.to_string_lossy().into_owned()
 }
 
+#[cfg(unix)]
+fn cwd_reply_harness(path: &Path, name: &str) -> String {
+    let config = path.join(format!("{name}-harnesses.json"));
+    std::fs::write(
+        &config,
+        json!([{
+            "name": name,
+            "launch": [
+                "sh",
+                "-c",
+                "exec \"$1\" reply \"$2\" \"$PWD\"",
+                "sh",
+                BIN,
+                "{message_id}"
+            ]
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    config.to_string_lossy().into_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn launched_harness_uses_worktree_instead_of_shared_team_checkout() {
+    let d = TmpDir::new();
+    let main = d.0.join("repo");
+    std::fs::create_dir_all(main.join(".git/worktrees/feat")).unwrap();
+    let worktree = d.0.join("repo-feat");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", main.join(".git/worktrees/feat").display()),
+    )
+    .unwrap();
+    let harnesses = cwd_reply_harness(&main, "fake-worktree");
+    let env = [
+        ("TINCAN_HARNESSES", harnesses.as_str()),
+        ("TINCAN_LAUNCHED", ""),
+    ];
+    // A same-named harness in the shared main checkout must not receive worktree-local work.
+    assert_eq!(
+        exec(
+            None,
+            &[
+                "register",
+                "fake-worktree",
+                "--harness",
+                "fake-worktree",
+                "--pid",
+                "0",
+            ],
+            Opts {
+                env: &env,
+                cwd: Some(&main),
+                ..Opts::default()
+            },
+        )
+        .0,
+        0
+    );
+    let opts = Opts {
+        env: &env,
+        cwd: Some(&worktree),
+        ..Opts::default()
+    };
+    assert_eq!(
+        exec(
+            None,
+            &["register", "lead", "--harness", "test", "--pid", "0"],
+            opts,
+        )
+        .0,
+        0
+    );
+    let (rc, sent) = exec(
+        None,
+        &["--as", "lead", "send", "fake-worktree", "where?"],
+        opts,
+    );
+    assert_eq!(rc, 0, "{sent}");
+    let expected = std::fs::canonicalize(&worktree).unwrap();
+    assert_eq!(sent["launched"]["role"], "fake-worktree-2", "{sent}");
+    assert_eq!(
+        sent["launched"]["workspace"],
+        expected.to_string_lossy().as_ref()
+    );
+    let mid = id(&sent);
+    let (_, waited) = exec(
+        None,
+        &[
+            "--as",
+            "lead",
+            "wait",
+            "--replies-to",
+            &mid,
+            "--timeout",
+            "20",
+        ],
+        opts,
+    );
+    assert_eq!(strs(&waited["replied"]), ["fake-worktree-2"], "{waited}");
+    let (_, inbox) = exec(None, &["--as", "lead", "inbox"], opts);
+    assert_eq!(bodies(&inbox), [expected.to_string_lossy().as_ref()]);
+    assert!(main.join(".tincan").is_dir());
+    assert!(!worktree.join(".tincan").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn projectless_launch_uses_callers_working_directory() {
+    let d = TmpDir::new();
+    let home = d.0.join("home");
+    let appdata = home.join("appdata");
+    let workspace = d.0.join("scratch");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let harnesses = cwd_reply_harness(&d.0, "fake-projectless");
+    let home_s = home.to_string_lossy().into_owned();
+    let appdata_s = appdata.to_string_lossy().into_owned();
+    let env = [
+        ("HOME", home_s.as_str()),
+        ("USERPROFILE", home_s.as_str()),
+        ("LOCALAPPDATA", appdata_s.as_str()),
+        ("TINCAN_HARNESSES", harnesses.as_str()),
+        ("TINCAN_LAUNCHED", ""),
+    ];
+    let opts = Opts {
+        env: &env,
+        cwd: Some(&workspace),
+        ..Opts::default()
+    };
+    assert_eq!(
+        exec(
+            None,
+            &["register", "lead", "--harness", "test", "--pid", "0"],
+            opts,
+        )
+        .0,
+        0
+    );
+    let (_, sent) = exec(
+        None,
+        &["--as", "lead", "send", "fake-projectless", "where?"],
+        opts,
+    );
+    let expected = std::fs::canonicalize(&workspace).unwrap();
+    assert_eq!(
+        sent["launched"]["workspace"],
+        expected.to_string_lossy().as_ref()
+    );
+    let mid = id(&sent);
+    let (_, waited) = exec(
+        None,
+        &[
+            "--as",
+            "lead",
+            "wait",
+            "--replies-to",
+            &mid,
+            "--timeout",
+            "20",
+        ],
+        opts,
+    );
+    assert_eq!(strs(&waited["replied"]), ["fake-projectless"], "{waited}");
+    let (_, inbox) = exec(None, &["--as", "lead", "inbox"], opts);
+    assert_eq!(bodies(&inbox), [expected.to_string_lossy().as_ref()]);
+    assert!(appdata.join("tincan/default/.tincan").is_dir());
+    assert!(!workspace.join(".tincan").exists());
+}
+
 #[test]
 fn mail_to_a_missing_harness_starts_a_quick_session_that_answers() {
     let mut t = Team::new();
@@ -1627,6 +2152,56 @@ fn mail_to_a_missing_harness_starts_a_quick_session_that_answers() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn launched_harness_gets_only_baseline_and_explicit_environment() {
+    for (name, pass_env, expected) in [
+        ("clean", Vec::<&str>::new(), "unset"),
+        ("opted-in", vec!["TINCAN_TEST_SECRET"], "passed-on-purpose"),
+    ] {
+        let mut t = Team::new();
+        t.reg("lead", "claude");
+        let config = t.path("harnesses.json");
+        let observed_name = format!("{name}-environment.txt");
+        let observed = t.path(&observed_name);
+        std::fs::write(
+            &config,
+            json!([{
+                "name": name,
+                "launch": [
+                    "sh",
+                    "-c",
+                    "printf '%s' \"${TINCAN_TEST_SECRET-unset}\" > \"$1\"",
+                    "sh",
+                    observed
+                ],
+                "pass_env": pass_env
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let config = config.to_string_lossy().into_owned();
+        let env = [
+            ("TINCAN_HARNESSES", config.as_str()),
+            ("TINCAN_LAUNCHED", ""),
+            ("TINCAN_TEST_SECRET", "passed-on-purpose"),
+        ];
+        let (rc, sent) = t.env(&["--as", "lead", "send", name, "ping?"], &env);
+        assert_eq!(rc, 0, "{sent}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if std::fs::read_to_string(&observed).is_ok_and(|contents| contents == expected) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fake harness did not run: {sent}"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
 #[test]
 fn launching_is_optional() {
     let mut t = Team::new();
@@ -1646,12 +2221,25 @@ fn launching_is_optional() {
     );
     assert_eq!(rc, 3);
     // and a launched session can't launch more
+    let team = t.dir.to_string_lossy().into_owned();
     let env = [
         ("TINCAN_HARNESSES", h.as_str()),
-        ("TINCAN_LAUNCHED", ""),
+        ("TINCAN_TEAM_DIR", team.as_str()),
+        ("TINCAN_ROLE", "lead"),
         ("TINCAN_LAUNCHED", "1"),
     ];
-    assert_eq!(t.env(&["--as", "lead", "send", "fake", "x"], &env).0, 3);
+    assert_eq!(
+        exec(
+            None,
+            &["send", "fake", "x"],
+            Opts {
+                env: &env,
+                ..Opts::default()
+            }
+        )
+        .0,
+        3
+    );
     assert_eq!(roles(&t.out(&["peers"])), ["lead"]);
 }
 

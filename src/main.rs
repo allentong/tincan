@@ -81,6 +81,12 @@ pub enum Cmd {
         #[arg(long)]
         new: bool,
     },
+    /// Reply to a message; the original sender is resolved from `<id>`
+    Reply {
+        id: String,
+        /// Reply body; `-` reads stdin
+        body: String,
+    },
     /// Read unread messages
     Inbox {
         /// Show without leasing or marking read
@@ -92,6 +98,12 @@ pub enum Cmd {
         /// Lease messages and leave them unread until `tincan ack`
         #[arg(long)]
         require_ack: bool,
+        /// Maximum messages returned in one call
+        #[arg(long, default_value_t = 25, value_parser = inbox_limit)]
+        limit: usize,
+        /// Continue a non-consuming peek after this message id
+        #[arg(long, requires = "peek", conflicts_with = "count")]
+        after: Option<String>,
     },
     /// Mark leased messages read
     Ack { ids: Vec<String> },
@@ -146,11 +158,8 @@ fn main() {
 }
 
 /// Anything tincan set up on its own (a team, a registration) is confirmed in the output.
-fn with_setup(mut v: serde_json::Value) -> serde_json::Value {
-    if let (Some(obj), Some(setup)) = (v.as_object_mut(), store::take_notes()) {
-        obj.insert("setup".into(), setup.into());
-    }
-    v
+fn with_setup(v: serde_json::Value) -> serde_json::Value {
+    store::attach_notes(v)
 }
 
 fn fail(e: TincanError) -> ! {
@@ -163,5 +172,12 @@ fn seconds(s: &str) -> std::result::Result<f64, String> {
     match s.parse::<f64>() {
         Ok(v) if v.is_finite() && v >= 0.0 => Ok(v),
         _ => Err(format!("{s:?} is not a non-negative number of seconds")),
+    }
+}
+
+fn inbox_limit(s: &str) -> std::result::Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(value @ 1..=100) => Ok(value),
+        _ => Err(format!("{s:?} is not an integer from 1 through 100")),
     }
 }

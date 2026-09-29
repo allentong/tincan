@@ -18,6 +18,7 @@ pub enum Code {
     NotRegistered,
     HopLimit,
     ReplyNotWanted,
+    MailboxFull,
     Store,
 }
 
@@ -31,6 +32,7 @@ impl Code {
             Code::NotRegistered => 6,
             Code::HopLimit => 7,
             Code::ReplyNotWanted => 8,
+            Code::MailboxFull => 9,
             Code::Store => 10,
         }
     }
@@ -45,6 +47,7 @@ impl Code {
             Code::NotRegistered => "not_registered",
             Code::HopLimit => "hop_limit",
             Code::ReplyNotWanted => "reply_not_wanted",
+            Code::MailboxFull => "mailbox_full",
             Code::Store => "store",
         }
     }

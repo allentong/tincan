@@ -31,6 +31,8 @@ curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | 
 irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex
 ```
 
+Release artifacts carry GitHub build-provenance attestations. When an authenticated GitHub CLI is available, the installers verify that provenance automatically; otherwise they print that only the same-release checksum was verified. You can verify a downloaded archive manually with `gh attestation verify <archive> --repo allentong/tincan --signer-workflow allentong/tincan/.github/workflows/release.yml`.
+
 **Update:** rerun `cargo install --git https://github.com/allentong/tincan --force`, then `tincan install-skills`.
 
 ## Supported
@@ -73,7 +75,7 @@ Install once (one command, above), then just ask an agent: "message codex and as
 
 There is no setup step. The first time a session uses tincan (or starts, if hooks are installed):
 
-- **Team:** `.tincan/` is created at the git repo root, git-ignored and owner-only. Every session in the repo, including its worktrees, shares it. Outside a repo, sessions share a per-user default team (`~/.local/share/tincan/default`; Windows `%LOCALAPPDATA%\tincan\default`).
+- **Team:** `.tincan/` is created at the git repo root, git-ignored and owner-only. Every session in the repo, including its worktrees, shares it. Each peer also records its actual workspace, and a headless helper starts in the sender's worktree rather than the shared main checkout. Outside a repo, sessions share a per-user default team (`~/.local/share/tincan/default`; Windows `%LOCALAPPDATA%\tincan\default`) while helpers start in the sender's working directory.
 - **Name:** the session registers under its harness name, `claude`, `codex` or `grok`. A second live Claude session gets `claude-2`.
 - **Confirmation:** the command's output carries a `setup` field saying what was created and the name taken, and the skill tells the agent to relay it to you.
 
@@ -81,7 +83,7 @@ There is no setup step. The first time a session uses tincan (or starts, if hook
 tincan peers                                  # joins the team; lists who's online
 tincan send codex "Can you review src/auth.rs?"
 tincan inbox                                  # in the Codex session
-tincan send claude "Two issues, see notes.md" --reply-to <id>
+tincan reply <id> -                           # body is read from stdin
 ```
 
 **Asking an agent that isn't running.** Send to its harness name anyway. tincan starts a quick headless session (`claude -p`, `codex exec`, `grok -p`) in the team dir, and it answers and exits:
@@ -92,7 +94,7 @@ tincan wait --replies-to <id>                                   # returns once c
 tincan inbox
 ```
 
-The quick session reads the question with `tincan inbox` and replies with `--reply-to`. It can do work, not just answer. Codex's runs in its `workspace-write` sandbox. Claude's may edit files and run a fixed list of local commands (`tincan`, local `git` without push, and `cargo`/`npm`/`pnpm`/`pytest`/`go` build and test); anything else, including network access, is denied. Because it takes direction from another agent rather than from you, override `launch` for `claude` in `harnesses.json` to widen that list. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
+The quick session reads the question with `tincan inbox` and replies with `tincan reply`. It can do work, not just answer. Codex's runs in its `workspace-write` sandbox. Claude's may edit files and run a fixed list of non-privileged tincan commands, local `git` without push, and `cargo`/`npm`/`pnpm`/`pytest`/`go` build and test; anything else, including network access, is denied. A launched session cannot override its role/team, change tincan configuration, or start another session. It receives only path, locale, platform runtime, and explicitly configured environment variables. Because it takes direction from another agent rather than from you, override `launch` or `pass_env` for `claude` in `harnesses.json` only when the added capability is trusted. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
 
 **Keeping it for follow-ups.** With `--stay`, the started session answers or does the task, can ask the sender questions (`tincan send <sender> "…"`), and waits for more. It ends when told it's done, or when the sender's session ends. Follow-ups go to it by name, with its context intact. `--new` starts a fresh session under the next free name (`claude-2`) even when one is running.
 
@@ -106,6 +108,8 @@ tincan send claude "You're done, thanks" --no-reply
 Optional: `tincan register reviewer` for a custom name, `--as ROLE` / `TINCAN_ROLE` to act as one, `--team-dir` / `TINCAN_TEAM_DIR` or `tincan init` (current dir) to pick a different team. Plain shells and scripts aren't agent sessions, so they don't auto-register: use `register` or `--as`.
 
 Every command prints one JSON line and uses stable exit codes, so agents can parse the result. (`tincan hook` is the exception: it prints nothing when there's nothing to tell the agent.)
+
+`inbox` returns at most 25 messages by default (up to 100 with `--limit`) and includes `has_more` and `remaining`; call it again while `has_more` is true. A non-consuming `inbox --peek` also returns `next_cursor`; continue with `inbox --peek --after <next_cursor>`. Mailboxes and senders have pending-delivery quotas so a peer cannot grow the local store without bound.
 
 | Exit | Meaning |
 | --- | --- |
@@ -182,11 +186,12 @@ Check what's loaded with `tincan extensions`. Bad config is reported there; the 
 [
   {"name": "opencode", "process_names": ["opencode"],
    "session_env": ["OPENCODE_SESSION_ID"], "busy_text": "esc to interrupt",
-   "launch": ["opencode", "run", "{prompt}"]}
+   "launch": ["opencode", "run", "--dir", "{workspace}", "{prompt}"],
+   "pass_env": ["OPENROUTER_API_KEY"]}
 ]
 ```
 
-`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}`, `{role}`, `{sender}`, `{message_id}`.
+`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}` (shared team root), `{store}` (its `.tincan` directory), `{workspace}` (the sender's checkout or working directory), `{role}`, `{sender}`, `{message_id}`. Child processes start with a minimal environment; `pass_env` is the explicit opt-in for any additional variable the harness requires. Treat every added credential as granting the launched agent that credential's authority.
 
 Without a profile, any harness can still use `--as ROLE` or `TINCAN_ROLE`.
 
@@ -195,6 +200,8 @@ Without a profile, any harness can still use `--as ROLE` or `TINCAN_ROLE`.
 tincan is local-only: every peer runs on the same machine against the same team dir. Cloud-hosted agents aren't supported; the skill tells them to ask the user to run the session locally.
 
 Message bodies come from other agents. The skill tells agents to treat them as a peer's request, not the user's instruction, and never to take destructive or credentialed actions because a message asked.
+
+Roles are routing labels, not authenticated identities. Every process with access to the owner-only team store is trusted with every mailbox, so messages must not contain secrets from another local process or agent. Headless stdout/stderr logs persist in `.tincan/launch-<role>.log` until replaced or manually removed. See [SECURITY.md](SECURITY.md) for the full trust model and private reporting instructions.
 
 ## Development
 

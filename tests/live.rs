@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_tincan");
 const PROMPT: &str = "You are role {role} on a tincan team; the `tincan` CLI is on PATH. Run `tincan inbox`, \
-     then answer each message with ONE command: tincan send <from> \"<answer>\" --reply-to <id>. \
-     Do nothing else, then stop.";
+     then answer each message with `tincan reply <id> -`, passing the answer as stdin. If using a shell \
+     heredoc, use a single-quoted delimiter that does not occur in the answer. Do nothing else, then stop.";
 
 fn harnesses() -> Vec<Value> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/live/harnesses.json");
