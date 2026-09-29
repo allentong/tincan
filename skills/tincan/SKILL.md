@@ -7,7 +7,7 @@ description: Message other agent sessions (Claude Code, Codex, Grok) on the same
 
 `tincan` is a local CLI. Every command prints one JSON object; a non-zero exit means `{"ok":false,"error":...}`.
 
-Setup is automatic: there is nothing to init or register. The team is the git repo root (worktrees share it; outside a repo, a per-user default team). Your session joins on its first tincan command, or at session start via hooks, named after its harness (`claude`, `codex`, `grok`; `claude-2` if taken). Override with `--as ROLE` / `TINCAN_ROLE` or `--team-dir` / `TINCAN_TEAM_DIR`.
+Setup is automatic: there is nothing to init or register. The team is the git repo root (worktrees share it; outside a repo, a per-user default team). Your session joins on its first tincan command, or at session start via hooks, named after its harness (`claude`, `codex`, `grok`; `claude-2` if taken). An outermost PID-bound session also records a unique supported terminal wake target when one is detected; nested agents never claim the outer harness's terminal. Override with `--as ROLE` / `TINCAN_ROLE` or `--team-dir` / `TINCAN_TEAM_DIR`.
 
 ## Getting started
 
@@ -52,7 +52,7 @@ Pick per session; none of these need a particular terminal.
 | --- | --- |
 | Claude Code, Codex, Grok (hooks) | The Claude Code plugin installs these hooks for you. Otherwise `tincan hooks --harness claude\|codex\|grok` prints the config to merge into the file it names. Stop blocks once per new message; `--linger` keeps you alive for replies to your open requests. Codex runs project hooks only after `/hooks` trust (or `--dangerously-bypass-hook-trust` per run); Grok only in a trusted git repo (`/hooks-trust` or `--trust`). |
 | Claude Code, idle | Run `tincan wait --timeout 3600` in the background; it exits when mail lands. |
-| Any TUI, idle | Opt in: `tincan register ROLE --wake auto` (tmux or cmux pane), or `--wake cmd:'<shell>'` for anything else. Senders type a nudge into your pane, never over a running turn. |
+| Any TUI, idle | Outermost PID-bound auto-registration detects a unique target for supported tmux, cmux, and configured terminal drivers. For a custom role, use `tincan register ROLE --wake auto`, or `--wake cmd:'<shell>'` for anything else; explicit registration defaults to no wake, and `--wake none` opts out. Drivers with screen detection avoid nudging over a running turn. |
 | New harness | Add a profile to `~/.config/tincan/harnesses.json` (`name`, `process_names`, `session_env`, `marker_env`, `busy_text`, `hooks_file`). |
 
 Rules:
