@@ -4,12 +4,8 @@
 //! tmux and cmux ship as built-in entries; users add more (herdr, zellij, wezterm, ...) in
 //! `$TINCAN_DRIVERS`, else `~/.config/tincan/drivers.json`, without rebuilding. Templates run
 //! without a shell, one argv element per placeholder, so message text can't inject commands.
-//! None is the default: hooks and `tincan wait`.
-//!
-//! A peer's wake spec is read from the shared store, which a sandboxed launched session can
-//! write. So the spec only names a driver from the *sender's* own config plus a validated
-//! target; it never carries a command to run.
 
+use crate::identity::valid_token;
 use serde_json::{Value, json};
 use std::io;
 use std::process::{Command, Stdio};
@@ -26,15 +22,8 @@ pub trait Waker {
 /// Names that aren't drivers and can't be redefined.
 const RESERVED: [&str; 3] = ["none", "auto", "cmd"];
 
-/// Terminal targets are ids like `%3`, `surface:2` or a UUID. No leading `-`, so a target
-/// can't be read as an option by the helper it's passed to.
 fn valid_target(target: &str) -> bool {
-    !target.is_empty()
-        && target.len() <= 128
-        && !target.starts_with('-')
-        && target
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '%' | ':' | '.' | '_' | '-' | '@'))
+    !target.starts_with('-') && valid_token(target, 128, &['%', ':', '.', '_', '-', '@'])
 }
 
 #[derive(Debug, Clone)]
@@ -111,12 +100,7 @@ fn parse(v: &Value, builtin: bool) -> Result<Driver, String> {
         .and_then(Value::as_str)
         .ok_or("driver needs a \"name\"")?
         .to_string();
-    if RESERVED.contains(&name.as_str())
-        || name.len() > 64
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    {
+    if RESERVED.contains(&name.as_str()) || !valid_token(&name, 64, &['-', '_', '.']) {
         return Err(format!("driver name {name:?} is reserved or invalid"));
     }
     let nudge: Vec<Vec<String>> = v
@@ -234,7 +218,6 @@ pub fn resolve(spec: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// Re-validates the stored spec: the store isn't trusted to hold what `resolve` wrote.
 pub fn build(spec: &str) -> Option<Box<dyn Waker>> {
     let (kind, arg) = spec.split_once(':')?;
     if !valid_target(arg) {

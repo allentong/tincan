@@ -20,11 +20,10 @@ pub struct Profile {
     pub hooks_file: Option<String>,
     /// argv that starts a quick headless session to answer mail sent to this harness's name
     /// while none is running. Placeholders: {prompt} {team} {store} {workspace} {role} {sender}
-    /// {message_id} {sandbox} (Claude Code settings JSON that sandboxes its shell commands).
+    /// {message_id} {sandbox}.
     pub launch: Option<Vec<String>>,
-    /// argv appended once per extra tool rule a `--skill` brings (placeholder {tool}); None =
-    /// the harness takes no per-tool grants, so a skill only changes the prompt.
-    pub grant: Option<Vec<String>>,
+    /// Appended once per tool rule a `--skill` grants, with {tool} filled in.
+    pub grant_argv: Option<Vec<String>>,
     /// Additional environment variables explicitly passed to a launched session. The default
     /// launch environment contains only paths, locale, and platform runtime variables.
     pub pass_env: Vec<String>,
@@ -43,14 +42,8 @@ pub fn builtins() -> Vec<Profile> {
             marker_env: strs(&["CLAUDECODE"]),
             busy_text: Some("esc to interrupt".into()),
             hooks_file: Some(".claude/settings.local.json".into()),
-            // A launched Claude is driven by another agent's messages, not by the user. On macOS
-            // and Linux its shell commands run in Claude Code's sandbox ({sandbox}): writes only
-            // in the workspace and the team store, no network, no unsandboxed retry, and Claude
-            // won't start if the sandbox can't. Inside it, any command runs without asking (build,
-            // test, commit). Native Windows has no sandbox, so there only the listed tincan and
-            // read-only git commands run. Repo settings and MCP servers are skipped so a
-            // checked-out project can't widen this. A --skill adds its grants (skills.json).
-            // User settings still load: the user's own allow rules and hooks apply.
+            // --strict-mcp-config without --mcp-config loads no MCP servers; --setting-sources
+            // user skips project settings but still loads the user's allow rules and hooks.
             launch: Some(strs(&[
                 "claude",
                 "-p",
@@ -76,7 +69,7 @@ pub fn builtins() -> Vec<Profile> {
                 "Bash(git log:*)",
                 "Bash(git show:*)",
             ])),
-            grant: Some(strs(&["--allowedTools", "{tool}"])),
+            grant_argv: Some(strs(&["--allowedTools", "{tool}"])),
             pass_env: vec![],
         },
         Profile {
@@ -99,7 +92,7 @@ pub fn builtins() -> Vec<Profile> {
                 "{store}",
                 "{prompt}",
             ])),
-            grant: None,
+            grant_argv: None,
             pass_env: vec![],
         },
         Profile {
@@ -110,7 +103,7 @@ pub fn builtins() -> Vec<Profile> {
             busy_text: Some("[stop]".into()),
             hooks_file: Some(".grok/hooks/tincan.json".into()),
             launch: Some(strs(&["grok", "-p", "{prompt}"])),
-            grant: None,
+            grant_argv: None,
             pass_env: vec![],
         },
     ]
@@ -125,8 +118,10 @@ pub fn load() -> Vec<Profile> {
 pub fn load_with_errors() -> (Vec<Profile>, Vec<String>) {
     let (mut out, errors) = user_profiles();
     for b in builtins() {
-        if !out.iter().any(|p| p.name == b.name) {
-            out.push(b);
+        match out.iter_mut().find(|p| p.name == b.name) {
+            // An override written before a built-in field existed keeps the built-in's.
+            Some(p) => p.grant_argv = p.grant_argv.take().or(b.grant_argv),
+            None => out.push(b),
         }
     }
     (out, errors)
@@ -149,24 +144,53 @@ pub fn find(name: &str) -> Option<Profile> {
     load().into_iter().find(|p| p.name == name)
 }
 
-fn user_profiles() -> (Vec<Profile>, Vec<String>) {
-    let configured = std::env::var_os("TINCAN_HARNESSES");
-    let path = configured
+/// A JSON config file: `$env`, else `~/.config/tincan/<file>`. A missing default file is no
+/// config; a missing file named by `$env` is an error.
+pub fn read_config(env: &str, file: &str) -> Result<Option<(std::path::PathBuf, Value)>, String> {
+    let configured = std::env::var_os(env);
+    let Some(path) = configured
         .clone()
         .map(std::path::PathBuf::from)
-        .or_else(|| config_file("harnesses.json"));
-    let Some(path) = path else {
-        return (vec![], vec![]);
+        .or_else(|| config_file(file))
+    else {
+        return Ok(None);
     };
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && configured.is_none() => {
-            return (vec![], vec![]);
+            return Ok(None);
         }
-        Err(e) => return (vec![], vec![format!("{}: {e}", path.display())]),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    match serde_json::from_str::<Value>(&text) {
-        Ok(Value::Array(items)) => {
+    serde_json::from_str(&text)
+        .map(|v| Some((path.clone(), v)))
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// An optional array of strings.
+pub fn string_list(v: Option<&Value>, key: &str) -> Result<Vec<String>, String> {
+    let Some(value) = v else {
+        return Ok(vec![]);
+    };
+    value
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .map(|i| i.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| format!("{key:?} must be an array of strings"))
+}
+
+fn user_profiles() -> (Vec<Profile>, Vec<String>) {
+    let (path, value) = match read_config("TINCAN_HARNESSES", "harnesses.json") {
+        Ok(Some(found)) => found,
+        Ok(None) => return (vec![], vec![]),
+        Err(e) => return (vec![], vec![e]),
+    };
+    match value {
+        Value::Array(items) => {
             let mut profiles = vec![];
             let mut errors = vec![];
             for item in &items {
@@ -177,35 +201,21 @@ fn user_profiles() -> (Vec<Profile>, Vec<String>) {
             }
             (profiles, errors)
         }
-        Ok(_) => (
+        _ => (
             vec![],
             vec![format!("{}: expected a JSON array", path.display())],
         ),
-        Err(e) => (vec![], vec![format!("{}: {e}", path.display())]),
     }
 }
 
-/// `{"name": "opencode", "process_names": ["opencode"], "session_env": [...], "marker_env": [...],
-///   "busy_text": "esc to interrupt", "hooks_file": null,
-///   "launch": ["opencode", "run", "--dir", "{workspace}", "{prompt}"],
-///   "grant": ["--allow", "{tool}"], "pass_env": ["OPENROUTER_API_KEY"]}`
-/// — only `name` is required.
 fn parse(v: &Value) -> Result<Profile, String> {
-    let list = |key: &str| -> Result<Vec<String>, String> {
-        let Some(value) = v.get(key) else {
-            return Ok(vec![]);
-        };
-        let items = value
-            .as_array()
-            .ok_or_else(|| format!("{key:?} must be an array of strings"))?;
-        items
-            .iter()
-            .map(|item| {
-                item.as_str()
-                    .map(str::to_string)
-                    .ok_or_else(|| format!("{key:?} must contain only strings"))
-            })
-            .collect()
+    let list = |key: &str| string_list(v.get(key), key);
+    // `null` or `[]` means "none", as if the key were absent.
+    let optional = |key: &str| -> Result<Option<Vec<String>>, String> {
+        match v.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            _ => Ok(Some(list(key)?).filter(|items| !items.is_empty())),
+        }
     };
     let name = v
         .get("name")
@@ -213,11 +223,7 @@ fn parse(v: &Value) -> Result<Profile, String> {
         .filter(|name| !name.is_empty())
         .ok_or_else(|| "harness needs a non-empty \"name\"".to_string())?
         .to_string();
-    if name.len() > 64
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    {
+    if !crate::identity::valid_token(&name, 64, &['-', '_', '.']) {
         return Err(format!(
             "invalid harness name {name:?}: use 1-64 letters, digits, '-', '_' or '.'"
         ));
@@ -226,14 +232,8 @@ fn parse(v: &Value) -> Result<Profile, String> {
     if process_names.is_empty() {
         process_names.push(name.clone());
     }
-    let launch = match v.get("launch") {
-        None | Some(Value::Null) => None,
-        Some(_) => Some(list("launch")?).filter(|items| !items.is_empty()),
-    };
-    let grant = match v.get("grant") {
-        None | Some(Value::Null) => None,
-        Some(_) => Some(list("grant")?).filter(|items| !items.is_empty()),
-    };
+    let launch = optional("launch")?;
+    let grant_argv = optional("grant")?;
     Ok(Profile {
         process_names,
         session_env: list("session_env")?,
@@ -247,7 +247,7 @@ fn parse(v: &Value) -> Result<Profile, String> {
             .and_then(Value::as_str)
             .map(str::to_string),
         launch,
-        grant,
+        grant_argv,
         pass_env: list("pass_env")?,
         name,
     })
@@ -278,11 +278,10 @@ mod tests {
         let argv = claude.launch.unwrap().join(" ");
         assert!(argv.contains("--setting-sources user"), "{argv}");
         assert!(argv.contains("--settings {sandbox}"), "{argv}");
-        // The sandbox covers build/test/commit; nothing that runs project code is pre-allowed.
         for gone in ["cargo", "npm", "pytest", "git commit", "git add"] {
             assert!(!argv.contains(gone), "{gone} in {argv}");
         }
-        assert_eq!(claude.grant, Some(strs(&["--allowedTools", "{tool}"])));
+        assert_eq!(claude.grant_argv, Some(strs(&["--allowedTools", "{tool}"])));
     }
 
     #[test]

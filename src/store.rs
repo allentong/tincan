@@ -1,5 +1,5 @@
 use crate::error::{Code, Result, TincanError};
-use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -225,28 +225,35 @@ pub fn connect(db: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Columns added since a version shipped. Adding a nullable column in place, rather than
-/// bumping SCHEMA_VERSION, keeps the store intact while an older tincan (say, a plugin's hook
-/// binary) still uses it: a version mismatch rebuilds the store and drops all mail.
-fn add_missing_columns(conn: &Connection) -> Result<()> {
-    let has_skill: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name = 'skill')",
-        [],
+/// Nullable columns added after SCHEMA_VERSION 5 shipped, in place: bumping the version
+/// would rebuild the store and drop mail an older tincan binary still shares.
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[("messages", "skill", "TEXT")];
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+        params![table, column],
         |r| r.get(0),
-    )?;
-    if !has_skill {
-        let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-        // Re-check under the write lock: a concurrent first call may have just added it.
-        let added: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name = 'skill')",
-            [],
-            |r| r.get(0),
-        )?;
-        if !added {
-            tx.execute_batch("ALTER TABLE messages ADD COLUMN skill TEXT;")?;
+    )?)
+}
+
+fn add_missing_columns(conn: &Connection) -> Result<()> {
+    let mut missing = vec![];
+    for &(table, column, ty) in ADDED_COLUMNS {
+        if !has_column(conn, table, column)? {
+            missing.push((table, column, ty));
         }
-        tx.commit()?;
     }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    for (table, column, ty) in missing {
+        if !has_column(&tx, table, column)? {
+            tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty};"))?;
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 

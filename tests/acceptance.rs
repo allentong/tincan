@@ -1153,7 +1153,6 @@ fn default_is_no_wake() {
     assert_eq!(o["wake"], json!({}));
 }
 
-/// A user driver whose nudge appends `<role> <unread>` to `log`; returns the drivers.json path.
 fn log_driver(t: &Team, log: &str) -> String {
     let mut nudge = fake_terminal(t, log);
     nudge.extend(["{role}".to_string(), "{unread}".to_string()]);
@@ -1198,7 +1197,6 @@ fn removed_cmd_wake_is_rejected_and_never_run_from_the_store() {
     let mut t = Team::new();
     let (rc, o) = reg_wake(&mut t, "b", "cmd:echo nope", &[]);
     assert_eq!((rc, o["error"].as_str()), (2, Some("usage")), "{o}");
-    // A sandboxed session can write the store directly; a planted spec must not execute.
     let marker = t.path("pwned");
     reg_wake(&mut t, "b", "none", &[]);
     t.reg("a", "claude");
@@ -2469,8 +2467,6 @@ fn staying_session_waits_until_its_lead_is_done() {
     assert!(start.elapsed() < Duration::from_secs(3));
 }
 
-// ---- --skill: ask the recipient to use a skill; a launched one gets the skill's grants ----
-
 #[test]
 fn skill_travels_with_the_message() {
     let mut t = Team::new();
@@ -2571,7 +2567,6 @@ fn launched_session_gets_the_skill_prompt_and_its_grants() {
         argv.contains("--allow\nSkill(review)\n--allow\nBash(gh pr view:*)\n"),
         "{argv}"
     );
-    // Another skill's grants never leak in.
     assert!(!argv.contains("Bash(rm:*)"), "{argv}");
 }
 
@@ -2618,7 +2613,7 @@ fn skill_config_problems_warn_but_still_send() {
     );
     let missing = t.path("nope.json").display().to_string();
     for (cfg, expect) in [
-        (skills.as_str(), "no per-tool grants"),
+        (skills.as_str(), "has no \"grant\" template"),
         (missing.as_str(), "nope.json"),
     ] {
         let env = [
@@ -2633,8 +2628,12 @@ fn skill_config_problems_warn_but_still_send() {
             &env,
         );
         assert_eq!(rc, 0, "{sent}");
-        let warnings = sent["launched"]["skill"]["warnings"].to_string();
-        assert!(warnings.contains(expect), "{expect}: {sent}");
+        let warnings = &sent["launched"]["skill"]["warnings"];
+        let hit = warnings.as_array().is_some_and(|w| {
+            w.iter()
+                .any(|w| w.as_str().is_some_and(|w| w.contains(expect)))
+        });
+        assert!(hit, "{expect}: {sent}");
     }
 }
 
@@ -2672,7 +2671,6 @@ fn a_role_planted_in_the_store_is_never_typed_into_a_terminal() {
     drop(db);
     let (rc, o) = t.env(&["--as", "a", "send", "*", "hi"], &env);
     assert_eq!(rc, 0, "{o}");
-    // It is a recipient (the row counts as live), but it never reaches the wake driver.
     assert!(
         strs(&o["recipients"]).contains(&"x$(touch pwned)".to_string()),
         "{o}"
