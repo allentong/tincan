@@ -15,12 +15,17 @@ A launched session can write the team store, so nothing read from the store is e
 The boundary for a launched session is its harness's sandbox, not tincan's own checks. Those checks (no `--as`, `--team-dir`, `register` or `--new` inside a launched session) are guardrails against agent mistakes; a process can unset the environment that triggers them.
 - **Codex** runs in `workspace-write` with the team store added.
 - **Claude Code**, on macOS and Linux, runs its shell commands in Claude Code's sandbox:
-  - writes only in the workspace and the team store
+  - writes only in the workspace and the team store, never `~/.config/tincan`
+  - no reads of common credential stores
   - no network except domains a requested skill is granted
   - no unsandboxed retry
+  - no web tools or MCP servers
   - it refuses to start without the sandbox
-  - it doesn't load the repository's `.claude` settings
-- **Native Windows** has no Claude sandbox, so a launched Claude there is limited to edits plus tincan and read-only git commands. `git diff --output=<file>` can still write outside the workspace.
+  - it doesn't load the repository's `.claude` settings, but it does load the user's, whose allow rules, `excludedCommands` and hooks apply
+- **Granted domains** are open to every command in that session. Combined with a `read` grant for a credential, they give the session that credential's authority on those hosts.
+- **The home directory:** tincan refuses to launch a session whose workspace is the home directory or `/`, where workspace writes would reach shell and tool configuration.
+- **Wake:** a peer row written straight into the store with an invalid role is never nudged. Nudge text contains no shell metacharacters that run anything, but a planted wake target can still type that fixed line plus Enter into another pane of the user's terminal.
+- **Native Windows** has no Claude sandbox, so a launched Claude there is limited to edits plus tincan and read-only git commands. `git diff`, `git log` and `git show` accept `--output=<file>` and can still write outside the workspace.
 - **Grok** has no sandbox flag; a launched Grok runs with Grok's own defaults.
 
 Headless-agent stdout and stderr are written to owner-only `.tincan/launch-<role>.log` files. A later launch of the same role truncates its prior log, but otherwise logs persist and can contain message or tool output. Remove them when their diagnostic value ends.

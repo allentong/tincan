@@ -99,8 +99,12 @@ The quick session reads the question with `tincan inbox` and replies with `tinca
 - **Claude, on macOS and Linux:** runs its shell commands in Claude Code's sandbox:
   - local build, test and commit work, including in a worktree
   - writes are limited to the workspace, the team store and temp, so tools that write caches elsewhere (`~/.cargo`, package stores) or need the network fail
+  - credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`, …) can't be read, and `~/.config/tincan` can't be written
+  - web tools are off, and so are MCP servers
   - it won't start without the sandbox
-  - repository `.claude` settings aren't loaded
+  - repository `.claude` settings aren't loaded; your user settings are, so your own allow rules, `sandbox.excludedCommands` and hooks apply to it too
+
+  tincan won't start a session when the workspace is your home directory (run from a project instead).
 
   If you override `claude` in `harnesses.json`, keep `--settings {sandbox}` in its `launch` and `"grant": ["--allowedTools", "{tool}"]`, or its sessions lose the sandbox and skill grants.
 - **Claude, on native Windows:** has no sandbox, so it may edit files and run tincan and read-only `git` commands only.
@@ -110,11 +114,18 @@ A launched session cannot override its role/team, change tincan configuration, o
 **Asking for a skill.** `--skill NAME` asks the recipient to use one of its skills for the request, e.g. `tincan send codex "Review the diff" --skill code-review`. Messages carry it as `skill`, and a started session is told to load it. If the skill needs more than the defaults (say `gh`, which needs the network), grant it per harness in `~/.config/tincan/skills.json` (or `$TINCAN_SKILLS`):
 
 ```json
-{"shepherd-pr": {"claude": {"allow": ["Bash(gh pr view:*)", "Bash(gh run view:*)"],
-                            "domains": ["api.github.com"]}}}
+{"shepherd-pr": {"claude": {"domains": ["api.github.com"], "read": ["~/.config/gh"]}}}
 ```
 
-Only a session started for that skill gets these. `allow` rules are passed to Claude as `--allowedTools`, and `domains` open its sandbox's network to those hosts. Codex and Grok get the prompt only: their sandbox stays as is. The send's `launched.skill` shows what was granted.
+Only a session started for that skill gets these:
+- `domains` open the sandbox's network to those hosts, for every command the session runs, not just the skill's.
+- `read` lifts the credential-read block for those paths.
+
+Together they hand the session that credential's authority on that host. In the example, that's whatever your `gh` token can do on GitHub, so grant only what you'd let another agent use unsupervised.
+
+`allow` rules are passed to Claude as `--allowedTools`. On macOS and Linux every sandboxed shell command already runs, so these rules matter only for other tools and on native Windows.
+
+Codex and Grok get the prompt only: their sandbox stays as is. The send's `launched.skill` shows what was granted.
 
 **Keeping it for follow-ups.** With `--stay`, the started session answers or does the task, can ask the sender questions (`tincan send <sender> "…"`), and waits for more. It ends when told it's done, or when the sender's session ends. Follow-ups go to it by name, with its context intact. `--new` starts a fresh session under the next free name (`claude-2`) even when one is running.
 

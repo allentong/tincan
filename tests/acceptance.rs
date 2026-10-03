@@ -2542,7 +2542,7 @@ fn launched_session_gets_the_skill_prompt_and_its_grants() {
     assert_eq!(rc, 0, "{sent}");
     assert_eq!(
         sent["launched"]["skill"]["granted"],
-        json!({"allow": ["Skill(review)", "Bash(gh pr view:*)"], "domains": ["api.github.com"]}),
+        json!({"allow": ["Skill(review)", "Bash(gh pr view:*)"], "domains": ["api.github.com"], "read": []}),
         "{sent}"
     );
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -2652,4 +2652,55 @@ fn store_from_before_skills_gains_the_column_without_losing_mail() {
     assert_eq!(o["ok"], true, "{o}");
     let inbox = t.out(&["--as", "b", "inbox"]);
     assert_eq!(bodies(&inbox), ["kept", "new"], "{inbox}");
+}
+
+#[test]
+fn a_role_planted_in_the_store_is_never_typed_into_a_terminal() {
+    let mut t = Team::new();
+    let log = t.path("wake.log");
+    let drivers = log_driver(&t, &log.display().to_string());
+    let env = [("TINCAN_DRIVERS", drivers.as_str())];
+    t.reg("a", "claude");
+    let pid = t.owner();
+    let db = rusqlite::Connection::open(t.dir.join(".tincan/tincan.db")).unwrap();
+    db.execute(
+        "INSERT INTO peers(role, harness, pid, registered_at, last_seen, status, wake, workspace)
+         VALUES ('x$(touch pwned)', 'codex', ?1, 0, 1e12, 'active', 'logterm:x', '/')",
+        [pid],
+    )
+    .unwrap();
+    drop(db);
+    let (rc, o) = t.env(&["--as", "a", "send", "*", "hi"], &env);
+    assert_eq!(rc, 0, "{o}");
+    // It is a recipient (the row counts as live), but it never reaches the wake driver.
+    assert!(
+        strs(&o["recipients"]).contains(&"x$(touch pwned)".to_string()),
+        "{o}"
+    );
+    assert_eq!(o["wake"], json!({}), "{o}");
+    assert!(!log.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn no_session_is_started_in_the_home_directory() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let harnesses = t.write(
+        "harnesses.json",
+        &json!([{"name": "homey", "launch": ["true"]}]).to_string(),
+    );
+    let home = t.dir.display().to_string();
+    let env = [
+        ("TINCAN_HARNESSES", harnesses.as_str()),
+        ("TINCAN_LAUNCHED", ""),
+        ("HOME", home.as_str()),
+        ("TINCAN_WORKSPACE_DIR", home.as_str()),
+    ];
+    let (rc, o) = t.env(&["--as", "lead", "send", "homey", "hi"], &env);
+    assert_eq!(
+        (rc, o["error"].as_str()),
+        (3, Some("peer_unavailable")),
+        "{o}"
+    );
 }

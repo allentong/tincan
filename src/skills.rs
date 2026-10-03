@@ -26,6 +26,8 @@ pub fn valid_name(name: &str) -> bool {
 pub struct Grant {
     pub allow: Vec<String>,
     pub domains: Vec<String>,
+    /// Credential paths a sandboxed Claude may read anyway (e.g. `~/.config/gh` for `gh`).
+    pub read: Vec<String>,
 }
 
 /// What `harness` gets for `skill`, plus any config errors.
@@ -58,16 +60,26 @@ fn parse_grant(v: &Value) -> Result<Grant, String> {
     if v.is_array() {
         return Ok(Grant {
             allow: strings(Some(v), "allow")?,
-            domains: vec![],
+            ..Grant::default()
         });
     }
     if !v.is_object() {
-        return Err("expected {\"allow\": [...], \"domains\": [...]} or an array".into());
+        return Err(
+            "expected {\"allow\": [...], \"domains\": [...], \"read\": [...]} or an array".into(),
+        );
     }
     let grant = Grant {
         allow: strings(v.get("allow"), "allow")?,
         domains: strings(v.get("domains"), "domains")?,
+        read: strings(v.get("read"), "read")?,
     };
+    if let Some(bad) = grant
+        .read
+        .iter()
+        .find(|p| !(p.starts_with("~/") || p.starts_with('/')) || p.contains(".."))
+    {
+        return Err(format!("bad read path {bad:?}: use an absolute or ~/ path"));
+    }
     // A domain lands in the sandbox's network allowlist: keep it to a plain host pattern.
     if let Some(bad) = grant.domains.iter().find(|d| {
         d.is_empty()
@@ -145,5 +157,13 @@ mod tests {
         assert!(parse_grant(&json!({"domains": ["evil.com\"],\"x"]})).is_err());
         assert!(parse_grant(&json!({"allow": "X"})).is_err());
         assert!(parse_grant(&json!("X")).is_err());
+        assert!(parse_grant(&json!({"read": ["relative"]})).is_err());
+        assert!(parse_grant(&json!({"read": ["~/../etc"]})).is_err());
+        assert_eq!(
+            parse_grant(&json!({"read": ["~/.config/gh"]}))
+                .unwrap()
+                .read,
+            ["~/.config/gh"]
+        );
     }
 }

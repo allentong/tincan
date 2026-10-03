@@ -48,8 +48,9 @@ pub fn builtins() -> Vec<Profile> {
             // in the workspace and the team store, no network, no unsandboxed retry, and Claude
             // won't start if the sandbox can't. Inside it, any command runs without asking (build,
             // test, commit). Native Windows has no sandbox, so there only the listed tincan and
-            // read-only git commands run. Repo settings are skipped (--setting-sources user) so a
+            // read-only git commands run. Repo settings and MCP servers are skipped so a
             // checked-out project can't widen this. A --skill adds its grants (skills.json).
+            // User settings still load: the user's own allow rules and hooks apply.
             launch: Some(strs(&[
                 "claude",
                 "-p",
@@ -58,6 +59,7 @@ pub fn builtins() -> Vec<Profile> {
                 "acceptEdits",
                 "--setting-sources",
                 "user",
+                "--strict-mcp-config",
                 "--settings",
                 "{sandbox}",
                 "--allowedTools",
