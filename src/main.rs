@@ -43,7 +43,7 @@ pub enum Cmd {
         #[arg(long)]
         pid: Option<i64>,
         /// How senders wake this session when idle: none (default; hooks/wait), auto,
-        /// tmux:PANE, cmux:SURFACE, or cmd:SHELL
+        /// tmux:PANE, cmux:SURFACE, or DRIVER:TARGET for a driver in drivers.json
         #[arg(long)]
         wake: Option<String>,
     },

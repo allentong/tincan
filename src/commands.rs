@@ -229,8 +229,7 @@ fn extensions() -> Value {
         .iter()
         .map(|p| json!({"name": p.name, "process_names": p.process_names, "hooks_file": p.hooks_file}))
         .collect();
-    let mut wake: Vec<Value> = drivers.iter().map(wake::Driver::describe).collect();
-    wake.push(json!({"name": "cmd", "builtin": true, "detect_env": null, "busy_check": false}));
+    let wake: Vec<Value> = drivers.iter().map(wake::Driver::describe).collect();
     json!({"ok": errors.is_empty(), "harnesses": harnesses, "wake": wake, "errors": errors})
 }
 

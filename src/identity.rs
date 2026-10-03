@@ -282,7 +282,7 @@ pub struct Peer {
     pub pid: Option<i64>,
     pub last_seen: f64,
     pub status: String,
-    /// Wake driver spec (`tmux:%3`, `cmux:<surface>`, `cmd:<shell>`), None = hooks/wait only.
+    /// Wake driver spec (`tmux:%3`, `cmux:<surface>`, `<driver>:<target>`), None = hooks/wait only.
     pub wake: Option<String>,
     pub workspace: String,
 }

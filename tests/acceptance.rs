@@ -360,7 +360,7 @@ fn launched_sessions_are_confined_to_their_assigned_identity_and_protocol() {
     assert_eq!(run(&["send", "lead", "hello"]).0, 0);
     for args in [
         vec!["init"],
-        vec!["register", "attacker", "--wake", "cmd:echo nope"],
+        vec!["register", "attacker", "--wake", "tmux:%1"],
         vec!["hooks", "--harness", "claude"],
         vec!["extensions"],
         vec!["install-skills"],
@@ -1153,53 +1153,76 @@ fn default_is_no_wake() {
     assert_eq!(o["wake"], json!({}));
 }
 
+/// A user driver whose nudge appends `<role> <unread>` to `log`; returns the drivers.json path.
+fn log_driver(t: &Team, log: &str) -> String {
+    let mut nudge = fake_terminal(t, log);
+    nudge.extend(["{role}".to_string(), "{unread}".to_string()]);
+    t.write(
+        "drivers.json",
+        &json!([{"name": "logterm", "nudge": [nudge]}]).to_string(),
+    )
+}
+
+fn log_lines(log: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|l| l.replace('|', " ").trim().to_string())
+        .collect()
+}
+
 #[test]
-fn cmd_driver_nudges_once_per_new_message() {
+fn driver_nudges_once_per_new_message() {
     let mut t = Team::new();
     let log = t.path("wake.log");
+    let drivers = log_driver(&t, &log.display().to_string());
+    let env = [("TINCAN_DRIVERS", drivers.as_str())];
     t.reg("a", "claude");
-    // Redirect first on Windows: `echo b 1>> f` parses `1>>` as a stdout redirect.
-    let spec = if cfg!(windows) {
-        format!(
-            "cmd:>> \"{}\" echo %TINCAN_WAKE_ROLE% %TINCAN_WAKE_UNREAD%",
-            log.display()
-        )
-    } else {
-        format!(
-            "cmd:echo \"$TINCAN_WAKE_ROLE $TINCAN_WAKE_UNREAD\" >> \"{}\"",
-            log.display()
-        )
-    };
-    let (rc, o) = reg_wake(&mut t, "b", &spec, &[]);
+    let (rc, o) = reg_wake(&mut t, "b", "logterm:x", &env);
     assert_eq!(rc, 0, "{o}");
     assert_eq!(
-        t.out(&["--as", "a", "send", "b", "1"])["wake"],
+        t.env(&["--as", "a", "send", "b", "1"], &env).1["wake"],
         json!({"b": "nudged"})
     );
     // recipient hasn't read yet, but message 2 is new, so it gets its own nudge
     assert_eq!(
-        t.out(&["--as", "a", "send", "b", "2"])["wake"],
+        t.env(&["--as", "a", "send", "b", "2"], &env).1["wake"],
         json!({"b": "nudged"})
     );
     t.run(&["--as", "b", "inbox"]);
-    let text = std::fs::read_to_string(&log).unwrap();
-    let lines: Vec<&str> = text.lines().map(str::trim_end).take(2).collect();
-    assert_eq!(lines, ["b 1", "b 2"]);
+    assert_eq!(log_lines(&log)[..2], ["b 1", "b 2"]);
+}
+
+#[test]
+fn removed_cmd_wake_is_rejected_and_never_run_from_the_store() {
+    let mut t = Team::new();
+    let (rc, o) = reg_wake(&mut t, "b", "cmd:echo nope", &[]);
+    assert_eq!((rc, o["error"].as_str()), (2, Some("usage")), "{o}");
+    // A sandboxed session can write the store directly; a planted spec must not execute.
+    let marker = t.path("pwned");
+    reg_wake(&mut t, "b", "none", &[]);
+    t.reg("a", "claude");
+    let db = rusqlite::Connection::open(t.dir.join(".tincan/tincan.db")).unwrap();
+    db.execute(
+        "UPDATE peers SET wake = ?1 WHERE role = 'b'",
+        [format!("cmd:touch \"{}\"", marker.display())],
+    )
+    .unwrap();
+    let o = t.out(&["--as", "a", "send", "b", "x"]);
+    assert_eq!(o["wake"], json!({"b": "bad_spec"}));
+    assert!(!marker.exists());
 }
 
 #[test]
 fn nudge_counts_as_told_for_stop_hook() {
     let mut t = Team::new();
     let log = t.path("wake.log");
+    let drivers = log_driver(&t, &log.display().to_string());
+    let env = [("TINCAN_DRIVERS", drivers.as_str())];
     t.reg("a", "claude");
-    reg_wake(
-        &mut t,
-        "b",
-        &format!("cmd:echo x >> \"{}\"", log.display()),
-        &[],
-    );
+    reg_wake(&mut t, "b", "logterm:x", &env);
     t.run(&["--as", "b", "hook", "--event", "Stop"]);
-    let o = t.out(&["--as", "a", "send", "b", "1"]);
+    let o = t.env(&["--as", "a", "send", "b", "1"], &env).1;
     assert_eq!(o["wake"], json!({"b": "nudged"}));
     let (_, o) = t.with(
         &["--as", "b", "hook", "--event", "Stop"],
@@ -1214,9 +1237,19 @@ fn nudge_counts_as_told_for_stop_hook() {
 #[test]
 fn failed_nudge_never_fails_send() {
     let mut t = Team::new();
+    let fail: Vec<&str> = if cfg!(windows) {
+        vec!["cmd", "/D", "/C", "exit", "3"]
+    } else {
+        vec!["sh", "-c", "exit 3"]
+    };
+    let drivers = t.write(
+        "drivers.json",
+        &json!([{"name": "broken", "nudge": [fail]}]).to_string(),
+    );
+    let env = [("TINCAN_DRIVERS", drivers.as_str())];
     t.reg("a", "claude");
-    reg_wake(&mut t, "b", "cmd:exit 3", &[]);
-    let (rc, o) = t.run(&["--as", "a", "send", "b", "x"]);
+    reg_wake(&mut t, "b", "broken:x", &env);
+    let (rc, o) = t.env(&["--as", "a", "send", "b", "x"], &env);
     assert_eq!(rc, 0);
     assert!(o["wake"]["b"].as_str().unwrap().starts_with("failed"));
 }
@@ -1481,7 +1514,7 @@ fn broken_driver_file_keeps_builtins() {
         .iter()
         .map(|w| w["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["tmux", "cmux", "cmd"]);
+    assert_eq!(names, ["tmux", "cmux"]);
     assert_eq!(o["errors"].as_array().unwrap().len(), 1);
     // and the core still works
     t.reg("a", "claude");
