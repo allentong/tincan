@@ -96,7 +96,13 @@ tincan inbox
 
 The quick session reads the question with `tincan inbox` and replies with `tincan reply`. It can do work, not just answer, inside its harness's sandbox:
 - **Codex:** runs in its `workspace-write` sandbox.
-- **Claude, on macOS and Linux:** runs its shell commands in Claude Code's sandbox, so build, test and commit work. Writes are limited to the workspace and the team store, there's no network, and it won't start without the sandbox. Repository `.claude` settings aren't loaded.
+- **Claude, on macOS and Linux:** runs its shell commands in Claude Code's sandbox:
+  - local build, test and commit work, including in a worktree
+  - writes are limited to the workspace, the team store and temp, so tools that write caches elsewhere (`~/.cargo`, package stores) or need the network fail
+  - it won't start without the sandbox
+  - repository `.claude` settings aren't loaded
+
+  If you override `claude` in `harnesses.json`, keep `--settings {sandbox}` in its `launch` and `"grant": ["--allowedTools", "{tool}"]`, or its sessions lose the sandbox and skill grants.
 - **Claude, on native Windows:** has no sandbox, so it may edit files and run tincan and read-only `git` commands only.
 
 A launched session cannot override its role/team, change tincan configuration, or start another session. It receives only path, locale, platform runtime, and explicitly configured environment variables. Because it takes direction from another agent rather than from you, override `launch` or `pass_env` for `claude` in `harnesses.json` only when the added capability is trusted. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.

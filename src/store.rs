@@ -191,7 +191,7 @@ pub fn attach_notes(mut value: serde_json::Value) -> serde_json::Value {
 }
 
 /// Bump when SCHEMA changes. The store only holds in-flight mail, so an old one is rebuilt, not migrated.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 5;
 
 pub fn connect(db: &Path) -> Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -214,6 +214,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
         }
         tx.commit()?;
     }
+    add_missing_columns(&conn)?;
     for path in [
         db.to_path_buf(),
         db.with_extension("db-wal"),
@@ -222,6 +223,31 @@ pub fn connect(db: &Path) -> Result<Connection> {
         harden_file(&path).map_err(|e| TincanError::new(Code::Store, e.to_string()))?;
     }
     Ok(conn)
+}
+
+/// Columns added since a version shipped. Adding a nullable column in place, rather than
+/// bumping SCHEMA_VERSION, keeps the store intact while an older tincan (say, a plugin's hook
+/// binary) still uses it: a version mismatch rebuilds the store and drops all mail.
+fn add_missing_columns(conn: &Connection) -> Result<()> {
+    let has_skill: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name = 'skill')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_skill {
+        let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        // Re-check under the write lock: a concurrent first call may have just added it.
+        let added: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name = 'skill')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !added {
+            tx.execute_batch("ALTER TABLE messages ADD COLUMN skill TEXT;")?;
+        }
+        tx.commit()?;
+    }
+    Ok(())
 }
 
 fn user_version(conn: &Connection) -> Result<i64> {

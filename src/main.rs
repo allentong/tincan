@@ -82,7 +82,8 @@ pub enum Cmd {
         #[arg(long)]
         new: bool,
         /// Ask the recipient to use this skill for the request (e.g. code-review). A started
-        /// session also gets the tools ~/.config/tincan/skills.json grants that skill
+        /// session also gets the tools skills.json grants it ($TINCAN_SKILLS, else
+        /// ~/.config/tincan/skills.json)
         #[arg(long)]
         skill: Option<String>,
     },

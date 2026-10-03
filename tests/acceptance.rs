@@ -2602,3 +2602,54 @@ fn extensions_lists_skill_grants_and_reports_bad_config() {
     );
     assert_eq!(o["ok"], false, "{o}");
 }
+
+#[cfg(unix)]
+#[test]
+fn skill_config_problems_warn_but_still_send() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let harnesses = t.write(
+        "harnesses.json",
+        &json!([{"name": "nogrant", "launch": ["true"]}]).to_string(),
+    );
+    let skills = t.write(
+        "skills.json",
+        &json!({"review": {"nogrant": {"allow": ["X"], "domains": ["a.com"]}}}).to_string(),
+    );
+    let missing = t.path("nope.json").display().to_string();
+    for (cfg, expect) in [
+        (skills.as_str(), "no per-tool grants"),
+        (missing.as_str(), "nope.json"),
+    ] {
+        let env = [
+            ("TINCAN_HARNESSES", harnesses.as_str()),
+            ("TINCAN_SKILLS", cfg),
+            ("TINCAN_LAUNCHED", ""),
+        ];
+        let (rc, sent) = t.env(
+            &[
+                "--as", "lead", "send", "nogrant", "x", "--skill", "review", "--new",
+            ],
+            &env,
+        );
+        assert_eq!(rc, 0, "{sent}");
+        let warnings = sent["launched"]["skill"]["warnings"].to_string();
+        assert!(warnings.contains(expect), "{expect}: {sent}");
+    }
+}
+
+#[test]
+fn store_from_before_skills_gains_the_column_without_losing_mail() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    t.run(&["--as", "a", "send", "b", "kept"]);
+    let db = rusqlite::Connection::open(t.dir.join(".tincan/tincan.db")).unwrap();
+    db.execute_batch("ALTER TABLE messages DROP COLUMN skill;")
+        .unwrap();
+    drop(db);
+    let o = t.out(&["--as", "a", "send", "b", "new", "--skill", "s"]);
+    assert_eq!(o["ok"], true, "{o}");
+    let inbox = t.out(&["--as", "b", "inbox"]);
+    assert_eq!(bodies(&inbox), ["kept", "new"], "{inbox}");
+}

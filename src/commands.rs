@@ -844,9 +844,11 @@ fn launch_agent(profile: &harness::Profile, l: &Launch) -> Result<Started> {
         if profile.grant.is_some() {
             allow.push(format!("Skill({skill})"));
             allow.extend(grant.allow);
-        } else if !grant.allow.is_empty() {
+        } else if !grant.allow.is_empty() || profile.name == "claude" {
+            // A pre-existing `claude` override in harnesses.json has no grant template, so its
+            // session can't even be allowed the skill tool: say so rather than fail quietly.
             warnings.push(format!(
-                "{} takes no per-tool grants (no \"grant\" in its profile); skills.json allow rules ignored",
+                "{} takes no per-tool grants (no \"grant\" in its profile); the skill and any skills.json allow rules weren't granted",
                 profile.name
             ));
         }
@@ -1385,4 +1387,25 @@ fn install_skills() -> Result<Option<Value>> {
     Ok(Some(
         json!({"ok": true, "installed": installed, "skipped": skipped}),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_settings_confine_writes_and_network() {
+        let v: Value = serde_json::from_str(&sandbox_settings(
+            Path::new("/t/.tincan"),
+            &["a.com".into()],
+        ))
+        .unwrap();
+        let sb = &v["sandbox"];
+        assert_eq!(sb["enabled"], true);
+        assert_eq!(sb["allowUnsandboxedCommands"], false);
+        assert_eq!(sb["failIfUnavailable"], !cfg!(windows));
+        assert_eq!(sb["filesystem"]["allowWrite"], json!(["/t/.tincan"]));
+        assert_eq!(sb["network"]["allowedDomains"], json!(["a.com"]));
+        assert_eq!(sb["network"]["strictAllowlist"], true);
+    }
 }

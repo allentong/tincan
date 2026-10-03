@@ -271,6 +271,19 @@ mod tests {
     }
 
     #[test]
+    fn launched_claude_is_sandboxed_and_skips_repo_settings() {
+        let claude = builtins().into_iter().find(|p| p.name == "claude").unwrap();
+        let argv = claude.launch.unwrap().join(" ");
+        assert!(argv.contains("--setting-sources user"), "{argv}");
+        assert!(argv.contains("--settings {sandbox}"), "{argv}");
+        // The sandbox covers build/test/commit; nothing that runs project code is pre-allowed.
+        for gone in ["cargo", "npm", "pytest", "git commit", "git add"] {
+            assert!(!argv.contains(gone), "{gone} in {argv}");
+        }
+        assert_eq!(claude.grant, Some(strs(&["--allowedTools", "{tool}"])));
+    }
+
+    #[test]
     fn parse_requires_name() {
         assert!(parse(&json!({"process_names": ["x"]})).is_err());
         assert!(parse(&json!({"name": "../../escape"})).is_err());
