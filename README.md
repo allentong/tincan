@@ -106,7 +106,7 @@ The quick session reads the question with `tincan inbox` and replies with `tinca
 
   tincan won't start a session when the workspace is your home directory (run from a project instead).
 
-  If you override `claude` in `harnesses.json`, keep `--settings {sandbox}` in its `launch` and `"grant": ["--allowedTools", "{tool}"]`, or its sessions lose the sandbox and skill grants.
+  If you override `claude` in `harnesses.json`, keep `--settings {sandbox}` in its `launch`, or its sessions lose the sandbox. An override without `"grant"` keeps the built-in one.
 - **Claude, on native Windows:** has no sandbox, so it may edit files and run tincan and read-only `git` commands only.
 
 A launched session cannot override its role/team, change tincan configuration, or start another session. It receives only path, locale, platform runtime, and explicitly configured environment variables. Because it takes direction from another agent rather than from you, override `launch` or `pass_env` for `claude` in `harnesses.json` only when the added capability is trusted. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
