@@ -360,7 +360,7 @@ fn launched_sessions_are_confined_to_their_assigned_identity_and_protocol() {
     assert_eq!(run(&["send", "lead", "hello"]).0, 0);
     for args in [
         vec!["init"],
-        vec!["register", "attacker", "--wake", "cmd:echo nope"],
+        vec!["register", "attacker", "--wake", "tmux:%1"],
         vec!["hooks", "--harness", "claude"],
         vec!["extensions"],
         vec!["install-skills"],
@@ -1153,53 +1153,74 @@ fn default_is_no_wake() {
     assert_eq!(o["wake"], json!({}));
 }
 
+fn log_driver(t: &Team, log: &str) -> String {
+    let mut nudge = fake_terminal(t, log);
+    nudge.extend(["{role}".to_string(), "{unread}".to_string()]);
+    t.write(
+        "drivers.json",
+        &json!([{"name": "logterm", "nudge": [nudge]}]).to_string(),
+    )
+}
+
+fn log_lines(log: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|l| l.replace('|', " ").trim().to_string())
+        .collect()
+}
+
 #[test]
-fn cmd_driver_nudges_once_per_new_message() {
+fn driver_nudges_once_per_new_message() {
     let mut t = Team::new();
     let log = t.path("wake.log");
+    let drivers = log_driver(&t, &log.display().to_string());
+    let env = [("TINCAN_DRIVERS", drivers.as_str())];
     t.reg("a", "claude");
-    // Redirect first on Windows: `echo b 1>> f` parses `1>>` as a stdout redirect.
-    let spec = if cfg!(windows) {
-        format!(
-            "cmd:>> \"{}\" echo %TINCAN_WAKE_ROLE% %TINCAN_WAKE_UNREAD%",
-            log.display()
-        )
-    } else {
-        format!(
-            "cmd:echo \"$TINCAN_WAKE_ROLE $TINCAN_WAKE_UNREAD\" >> \"{}\"",
-            log.display()
-        )
-    };
-    let (rc, o) = reg_wake(&mut t, "b", &spec, &[]);
+    let (rc, o) = reg_wake(&mut t, "b", "logterm:x", &env);
     assert_eq!(rc, 0, "{o}");
     assert_eq!(
-        t.out(&["--as", "a", "send", "b", "1"])["wake"],
+        t.env(&["--as", "a", "send", "b", "1"], &env).1["wake"],
         json!({"b": "nudged"})
     );
     // recipient hasn't read yet, but message 2 is new, so it gets its own nudge
     assert_eq!(
-        t.out(&["--as", "a", "send", "b", "2"])["wake"],
+        t.env(&["--as", "a", "send", "b", "2"], &env).1["wake"],
         json!({"b": "nudged"})
     );
     t.run(&["--as", "b", "inbox"]);
-    let text = std::fs::read_to_string(&log).unwrap();
-    let lines: Vec<&str> = text.lines().map(str::trim_end).take(2).collect();
-    assert_eq!(lines, ["b 1", "b 2"]);
+    assert_eq!(log_lines(&log)[..2], ["b 1", "b 2"]);
+}
+
+#[test]
+fn removed_cmd_wake_is_rejected_and_never_run_from_the_store() {
+    let mut t = Team::new();
+    let (rc, o) = reg_wake(&mut t, "b", "cmd:echo nope", &[]);
+    assert_eq!((rc, o["error"].as_str()), (2, Some("usage")), "{o}");
+    let marker = t.path("pwned");
+    reg_wake(&mut t, "b", "none", &[]);
+    t.reg("a", "claude");
+    let db = rusqlite::Connection::open(t.dir.join(".tincan/tincan.db")).unwrap();
+    db.execute(
+        "UPDATE peers SET wake = ?1 WHERE role = 'b'",
+        [format!("cmd:touch \"{}\"", marker.display())],
+    )
+    .unwrap();
+    let o = t.out(&["--as", "a", "send", "b", "x"]);
+    assert_eq!(o["wake"], json!({"b": "bad_spec"}));
+    assert!(!marker.exists());
 }
 
 #[test]
 fn nudge_counts_as_told_for_stop_hook() {
     let mut t = Team::new();
     let log = t.path("wake.log");
+    let drivers = log_driver(&t, &log.display().to_string());
+    let env = [("TINCAN_DRIVERS", drivers.as_str())];
     t.reg("a", "claude");
-    reg_wake(
-        &mut t,
-        "b",
-        &format!("cmd:echo x >> \"{}\"", log.display()),
-        &[],
-    );
+    reg_wake(&mut t, "b", "logterm:x", &env);
     t.run(&["--as", "b", "hook", "--event", "Stop"]);
-    let o = t.out(&["--as", "a", "send", "b", "1"]);
+    let o = t.env(&["--as", "a", "send", "b", "1"], &env).1;
     assert_eq!(o["wake"], json!({"b": "nudged"}));
     let (_, o) = t.with(
         &["--as", "b", "hook", "--event", "Stop"],
@@ -1214,9 +1235,19 @@ fn nudge_counts_as_told_for_stop_hook() {
 #[test]
 fn failed_nudge_never_fails_send() {
     let mut t = Team::new();
+    let fail: Vec<&str> = if cfg!(windows) {
+        vec!["cmd", "/D", "/C", "exit", "3"]
+    } else {
+        vec!["sh", "-c", "exit 3"]
+    };
+    let drivers = t.write(
+        "drivers.json",
+        &json!([{"name": "broken", "nudge": [fail]}]).to_string(),
+    );
+    let env = [("TINCAN_DRIVERS", drivers.as_str())];
     t.reg("a", "claude");
-    reg_wake(&mut t, "b", "cmd:exit 3", &[]);
-    let (rc, o) = t.run(&["--as", "a", "send", "b", "x"]);
+    reg_wake(&mut t, "b", "broken:x", &env);
+    let (rc, o) = t.env(&["--as", "a", "send", "b", "x"], &env);
     assert_eq!(rc, 0);
     assert!(o["wake"]["b"].as_str().unwrap().starts_with("failed"));
 }
@@ -1481,7 +1512,7 @@ fn broken_driver_file_keeps_builtins() {
         .iter()
         .map(|w| w["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["tmux", "cmux", "cmd"]);
+    assert_eq!(names, ["tmux", "cmux"]);
     assert_eq!(o["errors"].as_array().unwrap().len(), 1);
     // and the core still works
     t.reg("a", "claude");
@@ -2434,4 +2465,240 @@ fn staying_session_waits_until_its_lead_is_done() {
     let (_, o) = t.env(&["--as", "helper", "wait", "--timeout", "10"], &env);
     assert_eq!(o["lead_gone"], "lead", "{o}");
     assert!(start.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn skill_travels_with_the_message() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    let o = t.out(&[
+        "--as",
+        "a",
+        "send",
+        "b",
+        "review this",
+        "--skill",
+        "code-review",
+    ]);
+    assert_eq!(o["skill"], "code-review", "{o}");
+    let inbox = t.out(&["--as", "b", "inbox"]);
+    assert_eq!(inbox["messages"][0]["skill"], "code-review", "{inbox}");
+    t.run(&["--as", "a", "send", "b", "plain"]);
+    assert!(t.out(&["--as", "b", "inbox"])["messages"][0]["skill"].is_null());
+}
+
+#[test]
+fn bad_skill_name_is_rejected() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    for bad in ["--dangerously-skip-permissions", "a b", "x)", ""] {
+        let (rc, o) = t.run(&["--as", "a", "send", "b", "hi", "--skill", bad]);
+        assert_eq!(
+            (rc, o["error"].as_str()),
+            (2, Some("usage")),
+            "{bad:?}: {o}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn launched_session_gets_the_skill_prompt_and_its_grants() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let observed = t.path("argv.txt");
+    let harnesses = t.write(
+        "harnesses.json",
+        &json!([{
+            "name": "skilly",
+            "launch": ["sh", "-c", "printf '%s\\n' \"$@\" > \"$0\"", observed, "{prompt}", "{sandbox}"],
+            "grant": ["--allow", "{tool}"]
+        }])
+        .to_string(),
+    );
+    let skills = t.write(
+        "skills.json",
+        &json!({"review": {"skilly": {"allow": ["Bash(gh pr view:*)"], "domains": ["api.github.com"]}},
+                "other": {"skilly": ["Bash(rm:*)"]}})
+        .to_string(),
+    );
+    let env = [
+        ("TINCAN_HARNESSES", harnesses.as_str()),
+        ("TINCAN_SKILLS", skills.as_str()),
+        ("TINCAN_LAUNCHED", ""),
+    ];
+    let (rc, sent) = t.env(
+        &[
+            "--as", "lead", "send", "skilly", "look", "--skill", "review",
+        ],
+        &env,
+    );
+    assert_eq!(rc, 0, "{sent}");
+    assert_eq!(
+        sent["launched"]["skill"]["granted"],
+        json!({"allow": ["Skill(review)", "Bash(gh pr view:*)"], "domains": ["api.github.com"], "read": []}),
+        "{sent}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let argv = loop {
+        if let Ok(text) = std::fs::read_to_string(&observed)
+            && text.contains("Skill(review)")
+        {
+            break text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fake harness did not run: {sent}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert!(argv.contains("use the `review` skill"), "{argv}");
+    assert!(
+        argv.contains("\"allowedDomains\":[\"api.github.com\"]"),
+        "{argv}"
+    );
+    assert!(
+        argv.contains("\"allowUnsandboxedCommands\":false"),
+        "{argv}"
+    );
+    assert!(
+        argv.contains("--allow\nSkill(review)\n--allow\nBash(gh pr view:*)\n"),
+        "{argv}"
+    );
+    assert!(!argv.contains("Bash(rm:*)"), "{argv}");
+}
+
+#[test]
+fn extensions_lists_skill_grants_and_reports_bad_config() {
+    let t = Team::new();
+    let good = t.write(
+        "skills.json",
+        &json!({"review": {"claude": ["X"]}}).to_string(),
+    );
+    let (_, o) = exec(
+        None,
+        &["extensions"],
+        Opts {
+            env: &[("TINCAN_SKILLS", good.as_str())],
+            ..Opts::default()
+        },
+    );
+    assert_eq!(o["skill_grants"], json!(["review"]), "{o}");
+    let bad = t.write("bad-skills.json", "[1]");
+    let (_, o) = exec(
+        None,
+        &["extensions"],
+        Opts {
+            env: &[("TINCAN_SKILLS", bad.as_str())],
+            ..Opts::default()
+        },
+    );
+    assert_eq!(o["ok"], false, "{o}");
+}
+
+#[cfg(unix)]
+#[test]
+fn skill_config_problems_warn_but_still_send() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let harnesses = t.write(
+        "harnesses.json",
+        &json!([{"name": "nogrant", "launch": ["true"]}]).to_string(),
+    );
+    let skills = t.write(
+        "skills.json",
+        &json!({"review": {"nogrant": {"allow": ["X"], "domains": ["a.com"]}}}).to_string(),
+    );
+    let missing = t.path("nope.json").display().to_string();
+    for (cfg, expect) in [
+        (skills.as_str(), "has no \"grant\" template"),
+        (missing.as_str(), "nope.json"),
+    ] {
+        let env = [
+            ("TINCAN_HARNESSES", harnesses.as_str()),
+            ("TINCAN_SKILLS", cfg),
+            ("TINCAN_LAUNCHED", ""),
+        ];
+        let (rc, sent) = t.env(
+            &[
+                "--as", "lead", "send", "nogrant", "x", "--skill", "review", "--new",
+            ],
+            &env,
+        );
+        assert_eq!(rc, 0, "{sent}");
+        let warnings = &sent["launched"]["skill"]["warnings"];
+        let hit = warnings.as_array().is_some_and(|w| {
+            w.iter()
+                .any(|w| w.as_str().is_some_and(|w| w.contains(expect)))
+        });
+        assert!(hit, "{expect}: {sent}");
+    }
+}
+
+#[test]
+fn store_from_before_skills_gains_the_column_without_losing_mail() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    t.run(&["--as", "a", "send", "b", "kept"]);
+    let db = rusqlite::Connection::open(t.dir.join(".tincan/tincan.db")).unwrap();
+    db.execute_batch("ALTER TABLE messages DROP COLUMN skill;")
+        .unwrap();
+    drop(db);
+    let o = t.out(&["--as", "a", "send", "b", "new", "--skill", "s"]);
+    assert_eq!(o["ok"], true, "{o}");
+    let inbox = t.out(&["--as", "b", "inbox"]);
+    assert_eq!(bodies(&inbox), ["kept", "new"], "{inbox}");
+}
+
+#[test]
+fn a_role_planted_in_the_store_is_never_typed_into_a_terminal() {
+    let mut t = Team::new();
+    let log = t.path("wake.log");
+    let drivers = log_driver(&t, &log.display().to_string());
+    let env = [("TINCAN_DRIVERS", drivers.as_str())];
+    t.reg("a", "claude");
+    let pid = t.owner();
+    let db = rusqlite::Connection::open(t.dir.join(".tincan/tincan.db")).unwrap();
+    db.execute(
+        "INSERT INTO peers(role, harness, pid, registered_at, last_seen, status, wake, workspace)
+         VALUES ('x$(touch pwned)', 'codex', ?1, 0, 1e12, 'active', 'logterm:x', '/')",
+        [pid],
+    )
+    .unwrap();
+    drop(db);
+    let (rc, o) = t.env(&["--as", "a", "send", "*", "hi"], &env);
+    assert_eq!(rc, 0, "{o}");
+    assert!(
+        strs(&o["recipients"]).contains(&"x$(touch pwned)".to_string()),
+        "{o}"
+    );
+    assert_eq!(o["wake"], json!({}), "{o}");
+    assert!(!log.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn no_session_is_started_in_the_home_directory() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let harnesses = t.write(
+        "harnesses.json",
+        &json!([{"name": "homey", "launch": ["true"]}]).to_string(),
+    );
+    let home = t.dir.display().to_string();
+    let env = [
+        ("TINCAN_HARNESSES", harnesses.as_str()),
+        ("TINCAN_LAUNCHED", ""),
+        ("HOME", home.as_str()),
+        ("TINCAN_WORKSPACE_DIR", home.as_str()),
+    ];
+    let (rc, o) = t.env(&["--as", "lead", "send", "homey", "hi"], &env);
+    assert_eq!(
+        (rc, o["error"].as_str()),
+        (3, Some("peer_unavailable")),
+        "{o}"
+    );
 }

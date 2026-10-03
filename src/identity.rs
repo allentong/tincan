@@ -282,7 +282,6 @@ pub struct Peer {
     pub pid: Option<i64>,
     pub last_seen: f64,
     pub status: String,
-    /// Wake driver spec (`tmux:%3`, `cmux:<surface>`, `cmd:<shell>`), None = hooks/wait only.
     pub wake: Option<String>,
     pub workspace: String,
 }
@@ -411,11 +410,16 @@ pub fn touch(conn: &Connection, role: &str) -> Result<()> {
 
 /// Role names: 1-64 of `[A-Za-z0-9._-]`, so they're safe in messages, shells and `*` broadcasts.
 pub fn valid_role(role: &str) -> bool {
-    !role.is_empty()
-        && role.len() <= 64
-        && role
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    valid_token(role, 64, &['-', '_', '.'])
+}
+
+/// 1..=`max` ASCII letters, digits and `extra`: the shape of every name tincan puts in an argv,
+/// a terminal or a config key.
+pub fn valid_token(s: &str, max: usize, extra: &[char]) -> bool {
+    !s.is_empty()
+        && s.len() <= max
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || extra.contains(&c))
 }
 
 /// `whoami`, registering the caller first if it's an agent session that hasn't joined yet:

@@ -63,6 +63,8 @@ EOF
 tincan wait --replies-to <id> --timeout 600
 ```
 
+If the user names a skill for the other agent to use (for example "have Codex review it with its code-review skill"), add `--skill <name>` to the send.
+
 Give your shell tool a timeout of at least 660 seconds. A quick Claude session usually answers in about 10 s, Codex in about 20 s, longer for a real review. Then read the answer with `tincan inbox`.
 
 If `wait` lists the agent under `ended`, it quit without answering, usually because that CLI isn't logged in. Show the user the last lines of the `log` path from the send's `launched` field and ask them to log in (`claude` then `/login`, or `codex login`). If it times out, tell the user; don't resend in a loop.
