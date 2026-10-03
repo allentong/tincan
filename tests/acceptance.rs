@@ -2468,3 +2468,137 @@ fn staying_session_waits_until_its_lead_is_done() {
     assert_eq!(o["lead_gone"], "lead", "{o}");
     assert!(start.elapsed() < Duration::from_secs(3));
 }
+
+// ---- --skill: ask the recipient to use a skill; a launched one gets the skill's grants ----
+
+#[test]
+fn skill_travels_with_the_message() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    let o = t.out(&[
+        "--as",
+        "a",
+        "send",
+        "b",
+        "review this",
+        "--skill",
+        "code-review",
+    ]);
+    assert_eq!(o["skill"], "code-review", "{o}");
+    let inbox = t.out(&["--as", "b", "inbox"]);
+    assert_eq!(inbox["messages"][0]["skill"], "code-review", "{inbox}");
+    t.run(&["--as", "a", "send", "b", "plain"]);
+    assert!(t.out(&["--as", "b", "inbox"])["messages"][0]["skill"].is_null());
+}
+
+#[test]
+fn bad_skill_name_is_rejected() {
+    let mut t = Team::new();
+    t.reg("a", "claude");
+    t.reg("b", "codex");
+    for bad in ["--dangerously-skip-permissions", "a b", "x)", ""] {
+        let (rc, o) = t.run(&["--as", "a", "send", "b", "hi", "--skill", bad]);
+        assert_eq!(
+            (rc, o["error"].as_str()),
+            (2, Some("usage")),
+            "{bad:?}: {o}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn launched_session_gets_the_skill_prompt_and_its_grants() {
+    let mut t = Team::new();
+    t.reg("lead", "claude");
+    let observed = t.path("argv.txt");
+    let harnesses = t.write(
+        "harnesses.json",
+        &json!([{
+            "name": "skilly",
+            "launch": ["sh", "-c", "printf '%s\\n' \"$@\" > \"$0\"", observed, "{prompt}", "{sandbox}"],
+            "grant": ["--allow", "{tool}"]
+        }])
+        .to_string(),
+    );
+    let skills = t.write(
+        "skills.json",
+        &json!({"review": {"skilly": {"allow": ["Bash(gh pr view:*)"], "domains": ["api.github.com"]}},
+                "other": {"skilly": ["Bash(rm:*)"]}})
+        .to_string(),
+    );
+    let env = [
+        ("TINCAN_HARNESSES", harnesses.as_str()),
+        ("TINCAN_SKILLS", skills.as_str()),
+        ("TINCAN_LAUNCHED", ""),
+    ];
+    let (rc, sent) = t.env(
+        &[
+            "--as", "lead", "send", "skilly", "look", "--skill", "review",
+        ],
+        &env,
+    );
+    assert_eq!(rc, 0, "{sent}");
+    assert_eq!(
+        sent["launched"]["skill"]["granted"],
+        json!({"allow": ["Skill(review)", "Bash(gh pr view:*)"], "domains": ["api.github.com"]}),
+        "{sent}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let argv = loop {
+        if let Ok(text) = std::fs::read_to_string(&observed)
+            && text.contains("Skill(review)")
+        {
+            break text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fake harness did not run: {sent}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert!(argv.contains("use the `review` skill"), "{argv}");
+    assert!(
+        argv.contains("\"allowedDomains\":[\"api.github.com\"]"),
+        "{argv}"
+    );
+    assert!(
+        argv.contains("\"allowUnsandboxedCommands\":false"),
+        "{argv}"
+    );
+    assert!(
+        argv.contains("--allow\nSkill(review)\n--allow\nBash(gh pr view:*)\n"),
+        "{argv}"
+    );
+    // Another skill's grants never leak in.
+    assert!(!argv.contains("Bash(rm:*)"), "{argv}");
+}
+
+#[test]
+fn extensions_lists_skill_grants_and_reports_bad_config() {
+    let t = Team::new();
+    let good = t.write(
+        "skills.json",
+        &json!({"review": {"claude": ["X"]}}).to_string(),
+    );
+    let (_, o) = exec(
+        None,
+        &["extensions"],
+        Opts {
+            env: &[("TINCAN_SKILLS", good.as_str())],
+            ..Opts::default()
+        },
+    );
+    assert_eq!(o["skill_grants"], json!(["review"]), "{o}");
+    let bad = t.write("bad-skills.json", "[1]");
+    let (_, o) = exec(
+        None,
+        &["extensions"],
+        Opts {
+            env: &[("TINCAN_SKILLS", bad.as_str())],
+            ..Opts::default()
+        },
+    );
+    assert_eq!(o["ok"], false, "{o}");
+}

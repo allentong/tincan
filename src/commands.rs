@@ -3,7 +3,7 @@ use crate::identity::{
     self, LazyCaller, PEER_COLS, Peer, PeerState, me, peer_from_row, touch, whoami,
 };
 use crate::store::{connect, create_private_file, now, resolve_team, resolve_workspace};
-use crate::{Cli, Cmd, harness, hooks, wake};
+use crate::{Cli, Cmd, harness, hooks, skills, wake};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -92,6 +92,7 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                     no_launch,
                     stay,
                     new,
+                    skill,
                 } => {
                     let opts = SendOpts {
                         to,
@@ -102,6 +103,7 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                         no_launch,
                         stay,
                         new,
+                        skill,
                         team: dir,
                         workspace: resolve_workspace()?,
                     };
@@ -225,12 +227,15 @@ fn extensions() -> Value {
     let (drivers, mut errors) = wake::load();
     let (profiles, harness_errors) = harness::load_with_errors();
     errors.extend(harness_errors);
+    let (skills, skill_errors) = skills::configured();
+    errors.extend(skill_errors);
     let harnesses: Vec<Value> = profiles
         .iter()
         .map(|p| json!({"name": p.name, "process_names": p.process_names, "hooks_file": p.hooks_file}))
         .collect();
     let wake: Vec<Value> = drivers.iter().map(wake::Driver::describe).collect();
-    json!({"ok": errors.is_empty(), "harnesses": harnesses, "wake": wake, "errors": errors})
+    json!({"ok": errors.is_empty(), "harnesses": harnesses, "wake": wake,
+           "skill_grants": skills, "errors": errors})
 }
 
 fn register(
@@ -398,6 +403,7 @@ struct SendOpts {
     no_launch: bool,
     stay: bool,
     new: bool,
+    skill: Option<String>,
     team: PathBuf,
     workspace: PathBuf,
 }
@@ -430,6 +436,7 @@ fn reply(
             no_launch: true,
             stay: false,
             new: false,
+            skill: None,
             team,
             workspace,
         },
@@ -470,6 +477,12 @@ fn send(
                 "body is {} bytes (max {MAX_BODY}); write it to a file and send the path + sha256",
                 body.len()
             ),
+        ));
+    }
+    if let Some(skill) = o.skill.as_deref().filter(|s| !skills::valid_name(s)) {
+        return Err(TincanError::new(
+            Code::Usage,
+            format!("invalid skill {skill:?}: use letters, digits, '-', '_', '.' or ':'"),
         ));
     }
     let me = me(conn, as_role, caller)?;
@@ -678,9 +691,9 @@ fn send(
     }
     let id = new_message_id();
     tx.execute(
-        "INSERT INTO messages(id, sender, client_id, kind, body, reply_to, hop, no_reply, created_at, recipients)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![id, me.role, o.client_id, kind, body, o.reply_to, hop, o.no_reply, t, json!(recipients).to_string()],
+        "INSERT INTO messages(id, sender, client_id, kind, body, reply_to, hop, no_reply, created_at, recipients, skill)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![id, me.role, o.client_id, kind, body, o.reply_to, hop, o.no_reply, t, json!(recipients).to_string(), o.skill],
     )?;
     {
         let mut ins =
@@ -694,8 +707,19 @@ fn send(
             // Started under the write lock, so its first `tincan inbox` waits for this commit;
             // if it can't start, the whole send rolls back.
             let role = &recipients[0];
-            let (pid, log) =
-                launch_agent(&profile, &o.team, &o.workspace, role, &me.role, &id, o.stay)?;
+            let started = launch_agent(
+                &profile,
+                &Launch {
+                    team: &o.team,
+                    workspace: &o.workspace,
+                    role,
+                    sender: &me.role,
+                    id: &id,
+                    stay: o.stay,
+                    skill: o.skill.as_deref(),
+                },
+            )?;
+            let (pid, log) = (started.pid, started.log);
             // Mail belongs to a session: the new one starts with just this message.
             tx.execute(
                 "DELETE FROM deliveries WHERE recipient = ?1 AND message_id != ?2",
@@ -710,11 +734,14 @@ fn send(
                    workspace = excluded.workspace",
                 params![role, o.to, pid, t, o.workspace.to_string_lossy()],
             )?;
-            Some(
-                json!({"role": role, "pid": pid, "log": log, "workspace": o.workspace,
-                "stay": o.stay,
-                "next": format!("tincan wait --replies-to {id}")}),
-            )
+            let mut launched = json!({"role": role, "pid": pid, "log": log,
+                "workspace": o.workspace, "stay": o.stay,
+                "next": format!("tincan wait --replies-to {id}")});
+            if let Some(skill) = &o.skill {
+                launched["skill"] = json!({"name": skill, "granted": started.granted,
+                                           "warnings": started.warnings});
+            }
+            Some(launched)
         }
         None => None,
     };
@@ -724,6 +751,9 @@ fn send(
         .filter(|p| recipients.contains(&p.role));
     let woke = wake_peers(conn, targets)?;
     let mut out = json!({"ok": true, "id": id, "kind": kind, "recipients": recipients, "hop": hop, "wake": woke});
+    if let Some(skill) = o.skill {
+        out["skill"] = skill.into();
+    }
     if let Some(l) = launched {
         out["launched"] = l;
     }
@@ -757,21 +787,76 @@ fn launch_profile(to: &str, no_launch: bool) -> Option<harness::Profile> {
     harness::find(to).filter(|p| p.launch.is_some())
 }
 
-/// Start a headless session in the team dir, detached, logging to .tincan/launch-<role>.log.
-fn launch_agent(
-    profile: &harness::Profile,
-    team: &Path,
-    workspace: &Path,
-    role: &str,
-    sender: &str,
-    id: &str,
+struct Launch<'a> {
+    team: &'a Path,
+    workspace: &'a Path,
+    role: &'a str,
+    sender: &'a str,
+    id: &'a str,
     stay: bool,
-) -> Result<(u32, PathBuf)> {
-    let argv = profile.launch.as_deref().expect("launch profile");
+    skill: Option<&'a str>,
+}
+
+struct Started {
+    pid: u32,
+    log: PathBuf,
+    /// Extra tool rules and domains the skill brought, as passed to the harness.
+    granted: Value,
+    warnings: Vec<String>,
+}
+
+const SKILL_PROMPT: &str = " The message asks you to use the `{skill}` skill: load it with your skill tool \
+(or read its SKILL.md) and follow it for this request. If no such skill is available, say so in your reply.";
+
+/// Claude Code settings for a launched session: shell commands sandboxed to the workspace and
+/// the team store, no network beyond `domains`, no unsandboxed retry, and no start without the
+/// sandbox, except on native Windows, which has none (the allow-list is the boundary there).
+fn sandbox_settings(store: &Path, domains: &[String]) -> String {
+    json!({"sandbox": {
+        "enabled": true,
+        "autoAllowBashIfSandboxed": true,
+        "allowUnsandboxedCommands": false,
+        "failIfUnavailable": !cfg!(windows),
+        "filesystem": {"allowWrite": [store]},
+        "network": {"allowedDomains": domains, "strictAllowlist": true},
+    }})
+    .to_string()
+}
+
+/// Start a headless session in the team dir, detached, logging to .tincan/launch-<role>.log.
+fn launch_agent(profile: &harness::Profile, l: &Launch) -> Result<Started> {
+    let Launch {
+        team,
+        workspace,
+        role,
+        sender,
+        id,
+        stay,
+        skill,
+    } = *l;
+    let base = profile.launch.as_deref().expect("launch profile");
+    let mut warnings = vec![];
+    let mut allow = vec![];
+    let mut domains = vec![];
+    if let Some(skill) = skill {
+        let (grant, errors) = skills::grant(skill, &profile.name);
+        warnings.extend(errors);
+        if profile.grant.is_some() {
+            allow.push(format!("Skill({skill})"));
+            allow.extend(grant.allow);
+        } else if !grant.allow.is_empty() {
+            warnings.push(format!(
+                "{} takes no per-tool grants (no \"grant\" in its profile); skills.json allow rules ignored",
+                profile.name
+            ));
+        }
+        domains = grant.domains;
+    }
     let team_s = team.to_string_lossy();
     let store = team.join(".tincan");
     let store_s = store.to_string_lossy();
     let workspace_s = workspace.to_string_lossy();
+    let sandbox = sandbox_settings(&store, &domains);
     let mut vars = vec![
         ("role", role),
         ("sender", sender),
@@ -779,11 +864,26 @@ fn launch_agent(
         ("team", team_s.as_ref()),
         ("store", store_s.as_ref()),
         ("workspace", workspace_s.as_ref()),
+        ("sandbox", sandbox.as_str()),
     ];
-    let template = if stay { STAY_PROMPT } else { QUICK_PROMPT };
-    let prompt = wake::fill(&[template.to_string()], &vars).remove(0);
+    let mut template = if stay { STAY_PROMPT } else { QUICK_PROMPT }.to_string();
+    if let Some(skill) = skill {
+        template.push_str(&SKILL_PROMPT.replace("{skill}", skill));
+    }
+    let prompt = wake::fill(&[template], &vars).remove(0);
     vars.push(("prompt", &prompt));
-    let argv = wake::fill(argv, &vars);
+    let mut argv = wake::fill(base, &vars);
+    if let Some(grant) = &profile.grant {
+        for tool in &allow {
+            argv.extend(wake::fill(grant, &[("tool", tool)]));
+        }
+    }
+    if !domains.is_empty() && !base.iter().any(|a| a.contains("{sandbox}")) {
+        warnings.push(format!(
+            "{} isn't launched with {{sandbox}}; skills.json domains ignored",
+            profile.name
+        ));
+    }
     let log = team.join(".tincan").join(format!("launch-{role}.log"));
     let fail = |e: std::io::Error| {
         TincanError::new(
@@ -801,6 +901,9 @@ fn launch_agent(
         let baseline = matches!(
             name.as_ref(),
             "HOME"
+                // macOS keychain logins (Claude Code's) are looked up by user name
+                | "USER"
+                | "LOGNAME"
                 | "USERPROFILE"
                 | "APPDATA"
                 | "LOCALAPPDATA"
@@ -855,7 +958,12 @@ fn launch_agent(
         std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0000_0200 | 0x0800_0000);
     }
     let child = cmd.spawn().map_err(fail)?;
-    Ok((child.id(), log))
+    Ok(Started {
+        pid: child.id(),
+        log,
+        granted: json!({"allow": allow, "domains": domains}),
+        warnings,
+    })
 }
 
 /// Poke recipients that registered a wake driver, once per new message, never over a running turn
@@ -993,7 +1101,7 @@ fn inbox(
     )?;
     let messages: Vec<Value> = {
         let mut stmt = tx.prepare(
-            "SELECT m.id, m.sender, m.kind, m.body, m.reply_to, m.hop, m.no_reply
+            "SELECT m.id, m.sender, m.kind, m.body, m.reply_to, m.hop, m.no_reply, m.skill
              FROM deliveries d JOIN messages m ON m.id = d.message_id
              WHERE d.recipient = ?1 AND (d.lease_until IS NULL OR d.lease_until < ?2)
                AND (?3 IS NULL OR m.created_at > ?3 OR (m.created_at = ?3 AND m.id > ?4))
@@ -1002,7 +1110,8 @@ fn inbox(
         stmt.query_map(params![me.role, t, after_created, after_id, o.limit as i64], |r| {
             Ok(json!({"id": r.get::<_, String>(0)?, "from": r.get::<_, String>(1)?, "kind": r.get::<_, String>(2)?,
                       "body": r.get::<_, String>(3)?, "reply_to": r.get::<_, Option<String>>(4)?,
-                      "hop": r.get::<_, i64>(5)?, "no_reply": r.get::<_, bool>(6)?}))
+                      "hop": r.get::<_, i64>(5)?, "no_reply": r.get::<_, bool>(6)?,
+                      "skill": r.get::<_, Option<String>>(7)?}))
         })?
         .collect::<rusqlite::Result<_>>()?
     };

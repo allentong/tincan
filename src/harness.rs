@@ -20,8 +20,11 @@ pub struct Profile {
     pub hooks_file: Option<String>,
     /// argv that starts a quick headless session to answer mail sent to this harness's name
     /// while none is running. Placeholders: {prompt} {team} {store} {workspace} {role} {sender}
-    /// {message_id}.
+    /// {message_id} {sandbox} (Claude Code settings JSON that sandboxes its shell commands).
     pub launch: Option<Vec<String>>,
+    /// argv appended once per extra tool rule a `--skill` brings (placeholder {tool}); None =
+    /// the harness takes no per-tool grants, so a skill only changes the prompt.
+    pub grant: Option<Vec<String>>,
     /// Additional environment variables explicitly passed to a launched session. The default
     /// launch environment contains only paths, locale, and platform runtime variables.
     pub pass_env: Vec<String>,
@@ -40,17 +43,23 @@ pub fn builtins() -> Vec<Profile> {
             marker_env: strs(&["CLAUDECODE"]),
             busy_text: Some("esc to interrupt".into()),
             hooks_file: Some(".claude/settings.local.json".into()),
-            // A launched Claude is driven by another agent's messages, not by the user, so it gets
-            // edits plus a fixed list of local commands: the non-privileged tincan operations,
-            // read-only and local git, build and test. Nothing that reaches the network or leaves
-            // the repo (no git push, curl, rm -rf); anything else is denied. Widen it per machine
-            // with `launch` in harnesses.json.
+            // A launched Claude is driven by another agent's messages, not by the user. On macOS
+            // and Linux its shell commands run in Claude Code's sandbox ({sandbox}): writes only
+            // in the workspace and the team store, no network, no unsandboxed retry, and Claude
+            // won't start if the sandbox can't. Inside it, any command runs without asking (build,
+            // test, commit). Native Windows has no sandbox, so there only the listed tincan and
+            // read-only git commands run. Repo settings are skipped (--setting-sources user) so a
+            // checked-out project can't widen this. A --skill adds its grants (skills.json).
             launch: Some(strs(&[
                 "claude",
                 "-p",
                 "{prompt}",
                 "--permission-mode",
                 "acceptEdits",
+                "--setting-sources",
+                "user",
+                "--settings",
+                "{sandbox}",
                 "--allowedTools",
                 "Bash(tincan inbox:*)",
                 "Bash(tincan reply:*)",
@@ -64,18 +73,8 @@ pub fn builtins() -> Vec<Profile> {
                 "Bash(git diff:*)",
                 "Bash(git log:*)",
                 "Bash(git show:*)",
-                "Bash(git add:*)",
-                "Bash(git commit:*)",
-                "Bash(cargo build:*)",
-                "Bash(cargo check:*)",
-                "Bash(cargo test:*)",
-                "Bash(cargo clippy:*)",
-                "Bash(cargo fmt:*)",
-                "Bash(npm test:*)",
-                "Bash(pnpm test:*)",
-                "Bash(pytest:*)",
-                "Bash(go test:*)",
             ])),
+            grant: Some(strs(&["--allowedTools", "{tool}"])),
             pass_env: vec![],
         },
         Profile {
@@ -98,6 +97,7 @@ pub fn builtins() -> Vec<Profile> {
                 "{store}",
                 "{prompt}",
             ])),
+            grant: None,
             pass_env: vec![],
         },
         Profile {
@@ -108,6 +108,7 @@ pub fn builtins() -> Vec<Profile> {
             busy_text: Some("[stop]".into()),
             hooks_file: Some(".grok/hooks/tincan.json".into()),
             launch: Some(strs(&["grok", "-p", "{prompt}"])),
+            grant: None,
             pass_env: vec![],
         },
     ]
@@ -185,7 +186,7 @@ fn user_profiles() -> (Vec<Profile>, Vec<String>) {
 /// `{"name": "opencode", "process_names": ["opencode"], "session_env": [...], "marker_env": [...],
 ///   "busy_text": "esc to interrupt", "hooks_file": null,
 ///   "launch": ["opencode", "run", "--dir", "{workspace}", "{prompt}"],
-///   "pass_env": ["OPENROUTER_API_KEY"]}`
+///   "grant": ["--allow", "{tool}"], "pass_env": ["OPENROUTER_API_KEY"]}`
 /// — only `name` is required.
 fn parse(v: &Value) -> Result<Profile, String> {
     let list = |key: &str| -> Result<Vec<String>, String> {
@@ -227,6 +228,10 @@ fn parse(v: &Value) -> Result<Profile, String> {
         None | Some(Value::Null) => None,
         Some(_) => Some(list("launch")?).filter(|items| !items.is_empty()),
     };
+    let grant = match v.get("grant") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(list("grant")?).filter(|items| !items.is_empty()),
+    };
     Ok(Profile {
         process_names,
         session_env: list("session_env")?,
@@ -240,6 +245,7 @@ fn parse(v: &Value) -> Result<Profile, String> {
             .and_then(Value::as_str)
             .map(str::to_string),
         launch,
+        grant,
         pass_env: list("pass_env")?,
         name,
     })

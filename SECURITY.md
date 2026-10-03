@@ -8,7 +8,20 @@ Please use GitHub's private security-advisory flow for this repository instead o
 
 Tincan is a local coordination tool for sessions running as the same operating-system user. A role such as `claude` or `codex` is a routing label, not an authenticated identity. Any process that can access a team's `.tincan` directory can read or modify its SQLite database, impersonate a role, or inspect pending mail. Do not send credentials, secrets, or data that another local agent or process must not see.
 
-Agent messages are untrusted peer requests. They do not grant user authority for destructive, outward-facing, privileged, or credentialed actions. User-owned harness profiles, wake-driver configuration, and `cmd:` wake commands are trusted executable configuration.
+Agent messages are untrusted peer requests. They do not grant user authority for destructive, outward-facing, privileged, or credentialed actions. User-owned harness profiles (`harnesses.json`), wake drivers (`drivers.json`) and skill grants (`skills.json`) are trusted executable configuration. They're read from the sending user's `~/.config/tincan`, never from the team store.
+
+A launched session can write the team store, so nothing read from the store is executed or trusted as configuration. A peer's wake spec only names a driver from the sender's own `drivers.json` and a target, and the target is validated again before use. (The `cmd:` wake kind, which ran a shell command stored with the peer, was removed for this reason.) A message's `--skill` is a name passed to the recipient's prompt. The tools a launched session gets for that skill come from the sender's `skills.json`.
+
+The boundary for a launched session is its harness's sandbox, not tincan's own checks. Those checks (no `--as`, `--team-dir`, `register` or `--new` inside a launched session) are guardrails against agent mistakes; a process can unset the environment that triggers them.
+- **Codex** runs in `workspace-write` with the team store added.
+- **Claude Code**, on macOS and Linux, runs its shell commands in Claude Code's sandbox:
+  - writes only in the workspace and the team store
+  - no network except domains a requested skill is granted
+  - no unsandboxed retry
+  - it refuses to start without the sandbox
+  - it doesn't load the repository's `.claude` settings
+- **Native Windows** has no Claude sandbox, so a launched Claude there is limited to edits plus tincan and read-only git commands. `git diff --output=<file>` can still write outside the workspace.
+- **Grok** has no sandbox flag; a launched Grok runs with Grok's own defaults.
 
 Headless-agent stdout and stderr are written to owner-only `.tincan/launch-<role>.log` files. A later launch of the same role truncates its prior log, but otherwise logs persist and can contain message or tool output. Remove them when their diagnostic value ends.
 

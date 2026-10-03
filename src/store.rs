@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS messages(
   id TEXT PRIMARY KEY,
   sender TEXT NOT NULL, client_id TEXT, kind TEXT NOT NULL, body TEXT NOT NULL,
   reply_to TEXT, hop INTEGER NOT NULL DEFAULT 0, no_reply INTEGER NOT NULL DEFAULT 0,
-  created_at REAL NOT NULL, recipients TEXT NOT NULL DEFAULT '[]', UNIQUE(sender, client_id));
+  created_at REAL NOT NULL, recipients TEXT NOT NULL DEFAULT '[]', skill TEXT,
+  UNIQUE(sender, client_id));
 CREATE TABLE IF NOT EXISTS deliveries(
   message_id TEXT NOT NULL, recipient TEXT NOT NULL,
   delivered_at REAL, lease_until REAL,
@@ -190,7 +191,7 @@ pub fn attach_notes(mut value: serde_json::Value) -> serde_json::Value {
 }
 
 /// Bump when SCHEMA changes. The store only holds in-flight mail, so an old one is rebuilt, not migrated.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 pub fn connect(db: &Path) -> Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE

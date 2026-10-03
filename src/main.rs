@@ -7,6 +7,7 @@ mod error;
 mod harness;
 mod hooks;
 mod identity;
+mod skills;
 mod store;
 mod wake;
 
@@ -80,6 +81,10 @@ pub enum Cmd {
         /// Start a fresh session (next free name, e.g. claude-2) even if one is running
         #[arg(long)]
         new: bool,
+        /// Ask the recipient to use this skill for the request (e.g. code-review). A started
+        /// session also gets the tools ~/.config/tincan/skills.json grants that skill
+        #[arg(long)]
+        skill: Option<String>,
     },
     /// Reply to a message; the original sender is resolved from `<id>`
     Reply {
