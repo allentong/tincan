@@ -30,14 +30,23 @@ pub fn run(team: Option<&str>, as_role: Option<&str>, event: &str, linger: f64) 
         .and_then(Value::as_str)
         .unwrap_or(event)
         .to_string();
-    let (_, db) = resolve_team(team, false).ok()?;
-    let conn = connect(&db).ok()?;
+    let notice = (event == "SessionStart")
+        .then(crate::update::session_start_notice)
+        .flatten();
+    let Some(conn) = resolve_team(team, false)
+        .ok()
+        .and_then(|(_, db)| connect(&db).ok())
+    else {
+        return notice.map(|n| with_context(&event, vec![n]));
+    };
     let caller = LazyCaller::with_session(session);
     if event == "SessionEnd" {
         let _ = unregister(&conn, as_role, &caller);
         return None;
     }
-    let me = me(&conn, as_role, &caller).ok()?;
+    let Ok(me) = me(&conn, as_role, &caller) else {
+        return notice.map(|n| with_context(&event, vec![n]));
+    };
     match event.as_str() {
         // A quick launched session answers and ends: it never waits for replies to its reply.
         "Stop" | "SubagentStop" => {
@@ -50,10 +59,19 @@ pub fn run(team: Option<&str>, as_role: Option<&str>, event: &str, linger: f64) 
                 return None;
             }
             mark_told(&conn, &me.role, &new).ok()?;
-            context(&conn, &me, &event)
+            let lines = context_lines(&conn, &me)?;
+            (!lines.is_empty()).then(|| with_context(&event, lines))
         }
-        _ => context(&conn, &me, &event),
+        _ => {
+            let mut lines = Vec::from_iter(notice);
+            lines.extend(context_lines(&conn, &me)?);
+            (!lines.is_empty()).then(|| with_context(&event, lines))
+        }
     }
+}
+
+fn with_context(event: &str, lines: Vec<String>) -> Value {
+    json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": lines.join("\n")}})
 }
 
 /// Harnesses pipe one JSON object and close stdin. Cap the wait so a caller that leaves
@@ -74,7 +92,7 @@ fn read_stdin_json() -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn context(conn: &Connection, me: &Peer, event: &str) -> Option<Value> {
+fn context_lines(conn: &Connection, me: &Peer) -> Option<Vec<String>> {
     let n = unread_count(conn, &me.role, false).ok()?;
     let mut lines = vec![];
     // First contact: tell the agent (and through it, the user) what tincan just set up.
@@ -92,9 +110,7 @@ fn context(conn: &Connection, me: &Peer, event: &str) -> Option<Value> {
             me.role
         ));
     }
-    (!lines.is_empty()).then(|| {
-        json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": lines.join("\n")}})
-    })
+    Some(lines)
 }
 
 /// Does this peer have a request out that nobody has answered yet?
