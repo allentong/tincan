@@ -812,10 +812,21 @@ const SANDBOX_DENY_READ: &[&str] = &[
     "~/.config/gcloud",
 ];
 
-/// Claude Code has no sandbox on native Windows, and its web tools run outside the sandbox.
+/// Claude Code has no sandbox on native Windows, and its file and web tools run outside it.
 fn sandbox_settings(store: &Path, grant: &skills::Grant) -> String {
+    let mut deny = vec!["WebFetch".to_string(), "WebSearch".to_string()];
+    for path in SANDBOX_DENY_READ {
+        let granted = grant
+            .allow_read
+            .iter()
+            .any(|g| path == g || path.starts_with(&format!("{}/", g.trim_end_matches('/'))));
+        if !granted {
+            deny.push(format!("Read({path})"));
+            deny.push(format!("Read({path}/**)"));
+        }
+    }
     json!({
-        "permissions": {"deny": ["WebFetch", "WebSearch"]},
+        "permissions": {"deny": deny},
         "sandbox": {
             "enabled": true,
             "autoAllowBashIfSandboxed": true,
@@ -1443,7 +1454,13 @@ mod tests {
         assert_eq!(sb["filesystem"]["denyWrite"], json!(["~/.config/tincan"]));
         assert!(sb["filesystem"]["denyRead"].to_string().contains("~/.ssh"));
         assert_eq!(sb["filesystem"]["allowRead"], json!(["~/.config/gh"]));
-        assert_eq!(v["permissions"]["deny"], json!(["WebFetch", "WebSearch"]));
+        let deny = v["permissions"]["deny"].to_string();
+        assert!(
+            deny.contains("\"WebFetch\"") && deny.contains("\"WebSearch\""),
+            "{deny}"
+        );
+        assert!(deny.contains("Read(~/.ssh/**)"), "{deny}");
+        assert!(!deny.contains("~/.config/gh"), "{deny}");
     }
 
     #[test]

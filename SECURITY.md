@@ -16,7 +16,7 @@ The boundary for a launched session is its harness's sandbox, not tincan's own c
 - **Codex** runs in `workspace-write` with the team store added.
 - **Claude Code**, on macOS and Linux, runs its shell commands in Claude Code's sandbox:
   - writes only in the workspace and the team store, never `~/.config/tincan`
-  - no reads of common credential stores
+  - no reads of common credential stores, by shell commands or by its Read tool
   - no network except domains a requested skill is granted
   - no unsandboxed retry
   - no web tools or MCP servers

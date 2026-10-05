@@ -99,7 +99,7 @@ The quick session reads the question with `tincan inbox` and replies with `tinca
 - **Claude, on macOS and Linux:** runs its shell commands in Claude Code's sandbox:
   - local build, test and commit work, including in a worktree
   - writes are limited to the workspace, the team store and temp, so tools that write caches elsewhere (`~/.cargo`, package stores) or need the network fail
-  - credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`, …) can't be read, and `~/.config/tincan` can't be written
+  - credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`, …) can't be read, by commands or the Read tool, and `~/.config/tincan` can't be written
   - web tools are off, and so are MCP servers
   - it won't start without the sandbox
   - repository `.claude` settings aren't loaded; your user settings are, so your own allow rules, `sandbox.excludedCommands` and hooks apply to it too
