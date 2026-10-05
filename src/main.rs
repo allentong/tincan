@@ -7,6 +7,7 @@ mod error;
 mod harness;
 mod hooks;
 mod identity;
+mod skills;
 mod store;
 mod wake;
 
@@ -43,7 +44,7 @@ pub enum Cmd {
         #[arg(long)]
         pid: Option<i64>,
         /// How senders wake this session when idle: none (default; hooks/wait), auto,
-        /// tmux:PANE, cmux:SURFACE, or cmd:SHELL
+        /// tmux:PANE, cmux:SURFACE, or DRIVER:TARGET for a driver in drivers.json
         #[arg(long)]
         wake: Option<String>,
     },
@@ -80,6 +81,11 @@ pub enum Cmd {
         /// Start a fresh session (next free name, e.g. claude-2) even if one is running
         #[arg(long)]
         new: bool,
+        /// Ask the recipient to use this skill for the request (e.g. code-review). A started
+        /// session also gets the tools skills.json grants it ($TINCAN_SKILLS, else
+        /// ~/.config/tincan/skills.json)
+        #[arg(long)]
+        skill: Option<String>,
     },
     /// Reply to a message; the original sender is resolved from `<id>`
     Reply {

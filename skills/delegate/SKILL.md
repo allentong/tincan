@@ -50,6 +50,8 @@ tincan send <agent> - --stay <<'EOF'          # add --new per step 1
 EOF
 ```
 
+If the user names a skill for the worker (for example "use shepherd-pr"), add `--skill <name>`. If `launched.skill.warnings` isn't empty, tell the user: it reports a broken `skills.json` or grants the harness ignored. tincan can't tell what tools a skill needs. If the worker reports a command was denied, the user can grant it in `~/.config/tincan/skills.json`.
+
 The result must have a `launched` field; if it doesn't, the message went to an existing session instead, so tell the user and stop. `--stay` keeps the worker alive for follow-ups until you say it's done. Note the message `id`, `launched.role` (e.g. `claude` or `claude-2`) and `launched.log`, and tell the user in one line that the work was handed off, to whom.
 
 ## 4. Direct it

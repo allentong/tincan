@@ -57,7 +57,7 @@ Cloud-hosted agents (Grok Bot, cloud sandboxes, CI) aren't supported: the skill 
 
 **Zero-config.** In fresh git repos with no `init` or `register`: `claude -p` and `codex exec` each auto-joined (team created at the repo root, sessions named `claude` and `codex`), and Claude asked Codex a question and got the answer. The same worked from the Claude desktop app (Code tab) running in a git worktree: it joined the main checkout's team and got Codex's reply.
 
-**Terminal wake.** cmux (Codex TUI), tmux 3.7 (Grok TUI) and herdr were tested with real sessions: an idle pane gets the nudge, and a pane mid-turn is skipped (`busy`) rather than typed over. The `cmd:` driver is covered by the test suite.
+**Terminal wake.** cmux (Codex TUI), tmux 3.7 (Grok TUI) and herdr were tested with real sessions: an idle pane gets the nudge, and a pane mid-turn is skipped (`busy`) rather than typed over. User-defined drivers are covered by the test suite.
 
 **Platforms.**
 
@@ -94,7 +94,38 @@ tincan wait --replies-to <id>                                   # returns once c
 tincan inbox
 ```
 
-The quick session reads the question with `tincan inbox` and replies with `tincan reply`. It can do work, not just answer. Codex's runs in its `workspace-write` sandbox. Claude's may edit files and run a fixed list of non-privileged tincan commands, local `git` without push, and `cargo`/`npm`/`pnpm`/`pytest`/`go` build and test; anything else, including network access, is denied. A launched session cannot override its role/team, change tincan configuration, or start another session. It receives only path, locale, platform runtime, and explicitly configured environment variables. Because it takes direction from another agent rather than from you, override `launch` or `pass_env` for `claude` in `harnesses.json` only when the added capability is trusted. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
+The quick session reads the question with `tincan inbox` and replies with `tincan reply`. It can do work, not just answer, inside its harness's sandbox:
+- **Codex:** runs in its `workspace-write` sandbox.
+- **Claude, on macOS and Linux:** runs its shell commands in Claude Code's sandbox:
+  - local build, test and commit work, including in a worktree
+  - writes are limited to the workspace, the team store and temp, so tools that write caches elsewhere (`~/.cargo`, package stores) or need the network fail
+  - credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`, …) can't be read, by commands or the Read tool, and `~/.config/tincan` can't be written
+  - web tools are off, and so are MCP servers
+  - it won't start without the sandbox
+  - repository `.claude` settings aren't loaded; your user settings are, so your own allow rules, `sandbox.excludedCommands` and hooks apply to it too
+
+  tincan won't start a session when the workspace is your home directory (run from a project instead).
+
+  If you override `claude` in `harnesses.json`, keep `--settings {sandbox}` in its `launch`, or its sessions lose the sandbox. An override without `"grant"` keeps the built-in one.
+- **Claude, on native Windows:** has no sandbox, so it may edit files and run tincan and read-only `git` commands only.
+
+A launched session cannot override its role/team, change tincan configuration, or start another session. It receives only path, locale, platform runtime, and explicitly configured environment variables. Because it takes direction from another agent rather than from you, override `launch` or `pass_env` for `claude` in `harnesses.json` only when the added capability is trusted. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
+
+**Asking for a skill.** `--skill NAME` asks the recipient to use one of its skills for the request, e.g. `tincan send codex "Review the diff" --skill code-review`. Messages carry it as `skill`, and a started session is told to load it. If the skill needs more than the defaults (say `gh`, which needs the network), grant it per harness in `~/.config/tincan/skills.json` (or `$TINCAN_SKILLS`):
+
+```json
+{"shepherd-pr": {"claude": {"domains": ["api.github.com"], "read": ["~/.config/gh"]}}}
+```
+
+Only a session started for that skill gets these:
+- `domains` open the sandbox's network to those hosts, for every command the session runs, not just the skill's.
+- `read` lifts the credential-read block for those paths.
+
+Together they hand the session that credential's authority on that host. In the example, that's whatever your `gh` token can do on GitHub, so grant only what you'd let another agent use unsupervised.
+
+`allow` rules are passed to Claude as `--allowedTools`. On macOS and Linux every sandboxed shell command already runs, so these rules matter only for other tools and on native Windows.
+
+Codex and Grok get the prompt only: their sandbox stays as is. The send's `launched.skill` shows what was granted.
 
 **Keeping it for follow-ups.** With `--stay`, the started session answers or does the task, can ask the sender questions (`tincan send <sender> "…"`), and waits for more. It ends when told it's done, or when the sender's session ends. Follow-ups go to it by name, with its context intact. `--new` starts a fresh session under the next free name (`claude-2`) even when one is running.
 
@@ -156,7 +187,7 @@ An agent sitting idle won't check its inbox on its own. Pick what fits each sess
 | Hooks | Claude Code, Codex, Grok | Included in the Claude Code plugin. Otherwise `tincan hooks --harness claude` (or `codex`) prints the config and the file to merge it into. The Stop hook blocks once per new message; `--linger 120` keeps an agent alive for replies to its own questions. |
 | Background wait | Claude Code | Run `tincan wait --timeout 3600` as a background task. It exits when mail lands. |
 | Terminal nudge | Any TUI in tmux, cmux, herdr, … | Outermost PID-bound auto-registered sessions detect a unique supported terminal target. For a custom role, use `tincan register ROLE --wake auto`; explicit registration defaults to no wake, so pass `--wake auto` to retain it or `--wake none` to opt out. Senders type a short nudge into the pane; drivers with screen detection avoid interrupting a running turn. |
-| Anything else | Scripts, notifiers | `--wake cmd:'<shell>'` runs with `TINCAN_WAKE_ROLE`, `TINCAN_WAKE_UNREAD`, `TINCAN_WAKE_TEXT`. |
+| Anything else | Scripts, notifiers | Define a driver in `drivers.json` (see [Extending](#extending)) and register with `--wake NAME:TARGET`. Its `nudge` argv can run any program, with `{role}`, `{unread}` and `{text}` filled in. |
 
 Codex runs project hooks only after you trust them in `/hooks`. Grok runs project hooks (`tincan hooks --harness grok` → `.grok/hooks/tincan.json`) only in a trusted folder (`/hooks-trust` or `grok --trust`) that is a git repository.
 
@@ -174,7 +205,7 @@ tincan --as lead inbox
 
 Check what's loaded with `tincan extensions`. Bad config is reported there; the built-ins keep working.
 
-**A new terminal** goes in `~/.config/tincan/drivers.json` (or `$TINCAN_DRIVERS`). A driver is argv templates, run without a shell:
+**A new terminal** goes in `~/.config/tincan/drivers.json` (or `$TINCAN_DRIVERS`). A driver is argv templates, run without a shell. Wake targets are letters, digits and `% : . _ - @`. The old `--wake cmd:<shell>` is gone: a launched session can write the team store, so a wake spec stored there can't carry a command. Write a driver instead:
 
 ```json
 [
@@ -192,11 +223,12 @@ Check what's loaded with `tincan extensions`. Bad config is reported there; the 
   {"name": "opencode", "process_names": ["opencode"],
    "session_env": ["OPENCODE_SESSION_ID"], "busy_text": "esc to interrupt",
    "launch": ["opencode", "run", "--dir", "{workspace}", "{prompt}"],
+   "grant": ["--allow", "{tool}"],
    "pass_env": ["OPENROUTER_API_KEY"]}
 ]
 ```
 
-`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}` (shared team root), `{store}` (its `.tincan` directory), `{workspace}` (the sender's checkout or working directory), `{role}`, `{sender}`, `{message_id}`. Child processes start with a minimal environment; `pass_env` is the explicit opt-in for any additional variable the harness requires. Treat every added credential as granting the launched agent that credential's authority.
+`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}` (shared team root), `{store}` (its `.tincan` directory), `{workspace}` (the sender's checkout or working directory), `{role}`, `{sender}`, `{message_id}`, and `{sandbox}` (the Claude Code settings JSON tincan uses to sandbox a launched Claude). `grant` is appended once per `skills.json` allow rule for a `--skill`, with `{tool}` filled in; leave it out and skills only change the prompt. Child processes start with a minimal environment; `pass_env` is the explicit opt-in for any additional variable the harness requires. Treat every added credential as granting the launched agent that credential's authority.
 
 Without a profile, any harness can still use `--as ROLE` or `TINCAN_ROLE`.
 

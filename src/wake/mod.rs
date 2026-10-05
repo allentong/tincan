@@ -4,10 +4,8 @@
 //! tmux and cmux ship as built-in entries; users add more (herdr, zellij, wezterm, ...) in
 //! `$TINCAN_DRIVERS`, else `~/.config/tincan/drivers.json`, without rebuilding. Templates run
 //! without a shell, one argv element per placeholder, so message text can't inject commands.
-//! `cmd:<shell>` is the one coded escape hatch. None is the default: hooks and `tincan wait`.
 
-mod cmd;
-
+use crate::identity::valid_token;
 use serde_json::{Value, json};
 use std::io;
 use std::process::{Command, Stdio};
@@ -23,6 +21,10 @@ pub trait Waker {
 
 /// Names that aren't drivers and can't be redefined.
 const RESERVED: [&str; 3] = ["none", "auto", "cmd"];
+
+fn valid_target(target: &str) -> bool {
+    !target.starts_with('-') && valid_token(target, 128, &['%', ':', '.', '_', '-', '@'])
+}
 
 #[derive(Debug, Clone)]
 pub struct Driver {
@@ -98,12 +100,7 @@ fn parse(v: &Value, builtin: bool) -> Result<Driver, String> {
         .and_then(Value::as_str)
         .ok_or("driver needs a \"name\"")?
         .to_string();
-    if RESERVED.contains(&name.as_str())
-        || name.len() > 64
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    {
+    if RESERVED.contains(&name.as_str()) || !valid_token(&name, 64, &['-', '_', '.']) {
         return Err(format!("driver name {name:?} is reserved or invalid"));
     }
     let nudge: Vec<Vec<String>> = v
@@ -187,11 +184,7 @@ impl Waker for Template {
 }
 
 fn kinds(drivers: &[Driver]) -> Vec<String> {
-    drivers
-        .iter()
-        .map(|d| d.name.clone())
-        .chain(["cmd".to_string()])
-        .collect()
+    drivers.iter().map(|d| d.name.clone()).collect()
 }
 
 /// Normalise a `--wake` value into a stored spec. `auto` picks the terminal this call runs in.
@@ -201,14 +194,22 @@ pub fn resolve(spec: &str) -> Result<Option<String>, String> {
         "none" => Ok(None),
         "auto" => Ok(drivers.iter().find_map(|d| {
             let target = std::env::var(d.detect_env.as_ref()?).ok()?;
-            (!target.is_empty()).then(|| format!("{}:{target}", d.name))
+            valid_target(&target).then(|| format!("{}:{target}", d.name))
         })),
         _ => {
             let (kind, arg) = spec.split_once(':').unwrap_or((spec, ""));
             let known = kinds(&drivers);
-            if arg.is_empty() || !known.iter().any(|k| k == kind) {
+            if kind == "cmd" {
+                return Err(
+                    "--wake cmd: was removed: define a driver in ~/.config/tincan/drivers.json \
+                     and register with --wake NAME:TARGET"
+                        .into(),
+                );
+            }
+            if !valid_target(arg) || !known.iter().any(|k| k == kind) {
                 return Err(format!(
-                    "bad --wake {spec:?}: use none, auto, or KIND:ARG with KIND one of {}",
+                    "bad --wake {spec:?}: use none, auto, or KIND:TARGET with KIND one of {} \
+                     and TARGET made of letters, digits and % : . _ - @",
                     known.join(", ")
                 ));
             }
@@ -219,8 +220,8 @@ pub fn resolve(spec: &str) -> Result<Option<String>, String> {
 
 pub fn build(spec: &str) -> Option<Box<dyn Waker>> {
     let (kind, arg) = spec.split_once(':')?;
-    if kind == "cmd" {
-        return Some(Box::new(cmd::Cmd(arg.into())));
+    if !valid_target(arg) {
+        return None;
     }
     let (drivers, _) = load();
     let driver = drivers.into_iter().find(|d| d.name == kind)?;
@@ -285,6 +286,17 @@ mod tests {
         assert_eq!(resolve("tmux:%3").unwrap().as_deref(), Some("tmux:%3"));
         assert!(resolve("tmux").is_err());
         assert!(resolve("zellij:1").is_err());
+        assert!(resolve("cmd:touch /tmp/x").is_err());
+        assert!(resolve("tmux:-t%0").is_err());
+        assert!(resolve("tmux:%3;x").is_err());
+    }
+
+    #[test]
+    fn stored_specs_are_revalidated() {
+        assert!(build("cmd:touch /tmp/x").is_none());
+        assert!(build("tmux:-Xflag").is_none());
+        assert!(build("tmux:a b").is_none());
+        assert!(build("tmux:%3").is_some());
     }
 
     #[test]

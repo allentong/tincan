@@ -1,5 +1,5 @@
 use crate::error::{Code, Result, TincanError};
-use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS messages(
   id TEXT PRIMARY KEY,
   sender TEXT NOT NULL, client_id TEXT, kind TEXT NOT NULL, body TEXT NOT NULL,
   reply_to TEXT, hop INTEGER NOT NULL DEFAULT 0, no_reply INTEGER NOT NULL DEFAULT 0,
-  created_at REAL NOT NULL, recipients TEXT NOT NULL DEFAULT '[]', UNIQUE(sender, client_id));
+  created_at REAL NOT NULL, recipients TEXT NOT NULL DEFAULT '[]', skill TEXT,
+  UNIQUE(sender, client_id));
 CREATE TABLE IF NOT EXISTS deliveries(
   message_id TEXT NOT NULL, recipient TEXT NOT NULL,
   delivered_at REAL, lease_until REAL,
@@ -213,6 +214,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
         }
         tx.commit()?;
     }
+    add_missing_columns(&conn)?;
     for path in [
         db.to_path_buf(),
         db.with_extension("db-wal"),
@@ -221,6 +223,38 @@ pub fn connect(db: &Path) -> Result<Connection> {
         harden_file(&path).map_err(|e| TincanError::new(Code::Store, e.to_string()))?;
     }
     Ok(conn)
+}
+
+/// Nullable columns added after SCHEMA_VERSION 5 shipped, in place: bumping the version
+/// would rebuild the store and drop mail an older tincan binary still shares.
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[("messages", "skill", "TEXT")];
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+        params![table, column],
+        |r| r.get(0),
+    )?)
+}
+
+fn add_missing_columns(conn: &Connection) -> Result<()> {
+    let mut missing = vec![];
+    for &(table, column, ty) in ADDED_COLUMNS {
+        if !has_column(conn, table, column)? {
+            missing.push((table, column, ty));
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    for (table, column, ty) in missing {
+        if !has_column(&tx, table, column)? {
+            tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty};"))?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 fn user_version(conn: &Connection) -> Result<i64> {
