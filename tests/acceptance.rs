@@ -2522,6 +2522,21 @@ fn installed_copy(root: &Path) -> (PathBuf, PathBuf) {
     (exe, home)
 }
 
+/// Linux refuses to exec a file another thread's forked child still holds open for writing
+/// (ETXTBSY), which a freshly copied binary hits while other tests spawn processes.
+#[cfg(unix)]
+fn output_retrying(cmd: &mut Command) -> std::process::Output {
+    for _ in 0..50 {
+        match cmd.output() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other.unwrap(),
+        }
+    }
+    panic!("still ETXTBSY")
+}
+
 #[cfg(unix)]
 fn run_bin(exe: &Path, home: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, Value) {
     let mut cmd = clean_command_for(exe);
@@ -2529,7 +2544,7 @@ fn run_bin(exe: &Path, home: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let out = cmd.stdin(Stdio::null()).output().unwrap();
+    let out = output_retrying(cmd.stdin(Stdio::null()));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let json = stdout
         .lines()
@@ -2541,7 +2556,7 @@ fn run_bin(exe: &Path, home: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32
 
 #[cfg(unix)]
 fn version_of(exe: &Path) -> String {
-    let out = Command::new(exe).arg("--version").output().unwrap();
+    let out = output_retrying(Command::new(exe).arg("--version"));
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
