@@ -139,7 +139,7 @@ pub enum Cmd {
         /// Only report whether a newer release exists
         #[arg(long)]
         check: bool,
-        #[arg(long, hide = true)]
+        #[arg(long, hide = true, conflicts_with = "check")]
         background: bool,
     },
 }

@@ -232,7 +232,7 @@ cargo test --test live broadcast -- --ignored --nocapture   # one question to ev
 
 Live harnesses are listed in `tests/live/harnesses.json`. Entries whose binary or API key is missing are skipped; `TINCAN_LIVE=codex,claude` picks a subset.
 
-Releases: push a `v*` tag and the release workflow builds and uploads the binaries `install.sh` fetches.
+Releases are automated with [release-please](https://github.com/googleapis/release-please). Merging to `main` keeps a Release PR up to date: it bumps the version in `Cargo.toml`, `Cargo.lock` and the plugin manifests, and writes `CHANGELOG.md` from the conventional commits. Merging that PR tags `vX.Y.Z` and creates the GitHub release, and the release workflow attaches the binaries `install.sh` and `tincan self-update` fetch. Don't edit versions or push tags by hand.
 
 ## License
 

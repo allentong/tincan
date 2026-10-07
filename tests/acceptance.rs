@@ -2454,11 +2454,13 @@ fn fake_release(version: &str, reports: &str, corrupt_sum: bool) -> (String, Pat
         std::process::id(),
         uuid_like()
     ));
-    let dl = root.join("latest/download");
+    let latest = root.join("latest/download");
+    let dl = root.join(format!("download/v{version}"));
     let pkg = root.join("pkg");
-    std::fs::create_dir_all(&dl).unwrap();
-    std::fs::create_dir_all(&pkg).unwrap();
-    std::fs::write(dl.join("version.txt"), format!("{version}\n")).unwrap();
+    for d in [&latest, &dl, &pkg] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(latest.join("version.txt"), format!("{version}\n")).unwrap();
     let stub = pkg.join("tincan");
     std::fs::write(
         &stub,
@@ -2729,4 +2731,36 @@ fn launched_sessions_cannot_self_update() {
             .contains("self-update is unavailable"),
         "{o}"
     );
+}
+
+#[test]
+fn check_and_background_are_exclusive() {
+    let (rc, o) = exec(
+        None,
+        &["self-update", "--check", "--background"],
+        Opts::default(),
+    );
+    assert_ne!(rc, 0, "{o}");
+}
+
+/// An archive under `latest/` that differs from the checked version is never fetched.
+#[cfg(unix)]
+#[test]
+fn self_update_downloads_the_version_it_checked() {
+    let (url, root) = fake_release("9.9.9", "tincan 9.9.9", false);
+    let latest = root.join("latest/download");
+    for entry in std::fs::read_dir(root.join("download/v9.9.9")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::write(latest.join(entry.file_name()), "wrong release").unwrap();
+    }
+    let (exe, home) = installed_copy(&root);
+    let (rc, o) = run_bin(
+        &exe,
+        &home,
+        &["self-update"],
+        &[("TINCAN_RELEASES_URL", &url)],
+    );
+    assert_eq!(rc, 0, "{o}");
+    assert_eq!(version_of(&exe), "tincan 9.9.9");
+    let _ = std::fs::remove_dir_all(root);
 }

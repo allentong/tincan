@@ -213,6 +213,7 @@ impl Drop for Staging {
 
 /// Download, verify and swap in `version` over the running binary.
 fn install(version: &str) -> Result<Value> {
+    let _lock = lock(true)?.ok_or_else(|| fail("couldn't take the update lock"))?;
     let asset = asset_name().ok_or_else(|| {
         fail(format!(
             "no release build for {}-{}; build with cargo install --git https://github.com/{REPO}",
@@ -226,6 +227,12 @@ fn install(version: &str) -> Result<Value> {
     let dir = exe
         .parent()
         .ok_or_else(|| fail("tincan binary has no parent directory"))?;
+    // Another updater may have finished while this one waited for the lock.
+    if let Some(on_disk) = reported_version(&exe)
+        && parse_version(&on_disk) >= parse_version(version)
+    {
+        return Ok(json!({"path": exe, "already_installed": on_disk}));
+    }
     // Stage next to the binary so the final rename stays on one filesystem.
     let staging = Staging(dir.join(format!(".tincan-update-{}", std::process::id())));
     std::fs::create_dir_all(&staging.0).map_err(|e| {
@@ -235,7 +242,7 @@ fn install(version: &str) -> Result<Value> {
         ))
     })?;
     let archive = staging.0.join(&asset);
-    let url = format!("{}/latest/download/{asset}", releases_url());
+    let url = format!("{}/download/v{version}/{asset}", releases_url());
     download(&url, &archive)?;
     let sums = staging.0.join(format!("{asset}.sha256"));
     download(&format!("{url}.sha256"), &sums)?;
@@ -278,15 +285,10 @@ fn install(version: &str) -> Result<Value> {
             .map_err(|e| fail(format!("{}: {e}", new.display())))?;
     }
     // The download has to be the release it claims to be before it replaces anything.
-    let reported = Command::new(&new)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    if reported != format!("tincan {version}") {
+    let reported = reported_version(&new).unwrap_or_default();
+    if reported != version {
         return Err(fail(format!(
-            "downloaded binary reports {reported:?}, expected \"tincan {version}\""
+            "downloaded binary reports \"tincan {reported}\", expected \"tincan {version}\""
         )));
     }
     replace(&new, &exe)?;
@@ -301,20 +303,53 @@ fn install(version: &str) -> Result<Value> {
     Ok(json!({"path": exe, "verified": verified, "skills_refreshed": skills}))
 }
 
+/// `<bin> --version` minus the `tincan ` prefix.
+fn reported_version(bin: &Path) -> Option<String> {
+    let out = Command::new(bin)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.trim().strip_prefix("tincan ").map(str::to_string)
+}
+
 fn replace(new: &Path, exe: &Path) -> Result<()> {
     let err = |e: std::io::Error| fail(format!("replace {}: {e}", exe.display()));
-    // Windows won't overwrite a running executable, but it will rename one.
-    if cfg!(windows) {
-        let old = exe.with_extension("old.exe");
-        let _ = std::fs::remove_file(&old);
-        std::fs::rename(exe, &old).map_err(err)?;
-        if let Err(e) = std::fs::rename(new, exe) {
-            let _ = std::fs::rename(&old, exe);
-            return Err(err(e));
-        }
-        return Ok(());
+    // Windows can't overwrite a running executable; self_replace moves it aside and cleans
+    // up after it exits.
+    #[cfg(windows)]
+    {
+        let _ = exe;
+        self_replace::self_replace(new).map_err(err)
     }
+    #[cfg(not(windows))]
     std::fs::rename(new, exe).map_err(err)
+}
+
+/// The update lock (`~/.config/tincan/update.lock`), held until dropped. `wait = false`
+/// returns None when another process holds it.
+fn lock(wait: bool) -> Result<Option<std::fs::File>> {
+    let path = config_file("update.lock").ok_or_else(|| fail("no home dir"))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| fail(format!("{}: {e}", dir.display())))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+    if wait {
+        file.lock()
+            .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+        return Ok(Some(file));
+    }
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(fail(format!("{}: {e}", path.display()))),
+    }
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -329,11 +364,16 @@ fn read_state() -> Value {
 }
 
 fn write_state(state: &Value) {
-    if let Some(path) = state_path() {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, state.to_string());
+    let Some(path) = state_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Readers never see a half-written file.
+    let tmp = path.with_extension(format!("json.{}", std::process::id()));
+    if std::fs::write(&tmp, state.to_string()).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -363,6 +403,9 @@ pub fn self_update(check: bool, background: bool) -> Result<Option<Value>> {
 
 /// Runs detached from a SessionStart hook: check, and in `auto` mode install. Never prints.
 fn background_check() {
+    if mode().0 == Mode::Off {
+        return;
+    }
     let Ok(latest) = latest_version() else {
         return;
     };
@@ -389,21 +432,32 @@ pub fn session_start_notice() -> Option<String> {
     if mode == Mode::Off {
         return None;
     }
-    let state = read_state();
-    let checked_at = state
-        .get("checked_at")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    if now() - checked_at >= CHECK_EVERY_SECS {
-        // Claim the check first, so sessions starting together don't all spawn one.
-        let mut claimed = state.clone();
-        if !claimed.is_object() {
-            claimed = json!({});
+    let due = |state: &Value| {
+        let checked_at = state
+            .get("checked_at")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        now() - checked_at >= CHECK_EVERY_SECS
+    };
+    let mut state = read_state();
+    // Claim the check under the lock, so sessions starting together spawn one between them.
+    // A held lock means another process is checking or installing right now.
+    if due(&state)
+        && let Ok(Some(_lock)) = lock(false)
+    {
+        state = read_state();
+        if due(&state) {
+            let mut claimed = if state.is_object() {
+                state.clone()
+            } else {
+                json!({})
+            };
+            claimed["checked_at"] = json!(now());
+            write_state(&claimed);
+            spawn_background_check();
         }
-        claimed["checked_at"] = json!(now());
-        write_state(&claimed);
-        spawn_background_check();
     }
+
     let latest = state.get("latest").and_then(Value::as_str)?;
     if !is_newer(latest) {
         return None;

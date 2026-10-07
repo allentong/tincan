@@ -1,14 +1,34 @@
 name: release
 
+# release-please keeps a Release PR open that bumps the versions (Cargo.toml, Cargo.lock, the
+# plugin manifests) and the changelog from conventional commits. Merging it tags vX.Y.Z and
+# creates the GitHub release; the jobs below then build and attach the binaries.
 on:
   push:
-    tags: ['v*']
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      created: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
   build:
+    needs: release-please
+    if: needs.release-please.outputs.created == 'true'
     permissions:
       contents: read
       id-token: write
@@ -32,6 +52,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-25
         with:
           targets: ${{ matrix.target }}
@@ -60,17 +82,35 @@ jobs:
           name: ${{ matrix.target }}
           path: tincan-*
 
-  release:
-    needs: build
+  upload:
+    needs: [release-please, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      TAG: ${{ needs.release-please.outputs.tag }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+      - name: Versions agree with the tag
+        run: |
+          v="${TAG#v}"
+          test "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')" = "$v"
+          test "$(jq -r .version .claude-plugin/plugin.json)" = "$v"
+          test "$(jq -r .metadata.version .claude-plugin/marketplace.json)" = "$v"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           merge-multiple: true
-      # `tincan self-update` reads this to learn the latest version.
-      - run: echo "${GITHUB_REF_NAME#v}" > version.txt
-      - run: gh release create "$GITHUB_REF_NAME" tincan-* version.txt --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+          path: dist
+      - name: The built binary reports the tag
+        run: |
+          tar -xzf dist/tincan-x86_64-unknown-linux-musl.tar.gz -C dist
+          test "$(dist/tincan --version)" = "tincan ${TAG#v}"
+          rm dist/tincan
+      # `tincan self-update` reads version.txt to learn the latest version.
+      - run: |
+          echo "${TAG#v}" > dist/version.txt
+          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
