@@ -13,7 +13,13 @@
       "source": "./",
       "description": "Message other local agent sessions (Claude Code, Codex, Grok): the tincan skill plus hooks that surface new mail.",
       "category": "productivity",
-      "tags": ["agents", "messaging", "codex", "grok", "multi-agent"]
+      "tags": [
+        "agents",
+        "messaging",
+        "codex",
+        "grok",
+        "multi-agent"
+      ]
     }
   ]
 }

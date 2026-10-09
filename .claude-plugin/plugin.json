@@ -7,5 +7,11 @@
   },
   "repository": "https://github.com/allentong/tincan",
   "license": "MIT",
-  "keywords": ["agents", "messaging", "codex", "grok", "multi-agent"]
+  "keywords": [
+    "agents",
+    "messaging",
+    "codex",
+    "grok",
+    "multi-agent"
+  ]
 }
