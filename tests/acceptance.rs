@@ -19,7 +19,11 @@ struct Opts<'a> {
 
 /// The inherited environment minus anything that would make tincan detect a real harness or terminal.
 fn clean_command() -> Command {
-    let mut cmd = Command::new(BIN);
+    clean_command_for(Path::new(BIN))
+}
+
+fn clean_command_for(program: &Path) -> Command {
+    let mut cmd = Command::new(program);
     cmd.env_clear();
     for (k, v) in std::env::vars_os() {
         let key = k.to_string_lossy();
@@ -29,6 +33,8 @@ fn clean_command() -> Command {
     }
     // Not an agent session unless a test says so, so nothing auto-registers by accident.
     cmd.env("TINCAN_OWNER_PID", "0");
+    // No background update checks against the real release server.
+    cmd.env("TINCAN_UPDATES", "off");
     // A throwaway home, so the per-user default team and config never touch the real one.
     let home = std::env::temp_dir().join(format!("tincan-home-{}", std::process::id()));
     cmd.env("HOME", &home)
@@ -2434,4 +2440,361 @@ fn staying_session_waits_until_its_lead_is_done() {
     let (_, o) = t.env(&["--as", "helper", "wait", "--timeout", "10"], &env);
     assert_eq!(o["lead_gone"], "lead", "{o}");
     assert!(start.elapsed() < Duration::from_secs(3));
+}
+
+// ---- self-update ----
+
+/// A fake release server on disk: `version.txt` plus this platform's archive, holding a stand-in
+/// `tincan` that reports `reports` for --version. Returns (releases URL, scratch dir).
+#[cfg(unix)]
+fn fake_release(version: &str, reports: &str, corrupt_sum: bool) -> (String, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!(
+        "tincan-release-{}-{}",
+        std::process::id(),
+        uuid_like()
+    ));
+    let latest = root.join("latest/download");
+    let dl = root.join(format!("download/v{version}"));
+    let pkg = root.join("pkg");
+    for d in [&latest, &dl, &pkg] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(latest.join("version.txt"), format!("{version}\n")).unwrap();
+    let stub = pkg.join("tincan");
+    std::fs::write(
+        &stub,
+        format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{reports}'; fi\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let os = match std::env::consts::OS {
+        "macos" => "apple-darwin",
+        _ => "unknown-linux-musl",
+    };
+    let asset = format!("tincan-{}-{os}.tar.gz", std::env::consts::ARCH);
+    let ok = Command::new("tar")
+        .arg("-czf")
+        .arg(dl.join(&asset))
+        .arg("-C")
+        .arg(&pkg)
+        .arg("tincan")
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    let out = Command::new("shasum")
+        .args(["-a", "256"])
+        .arg(dl.join(&asset))
+        .output()
+        .unwrap();
+    let mut hash = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    if corrupt_sum {
+        hash = "0".repeat(64);
+    }
+    std::fs::write(
+        dl.join(format!("{asset}.sha256")),
+        format!("{hash}  {asset}\n"),
+    )
+    .unwrap();
+    (format!("file://{}", root.display()), root)
+}
+
+#[cfg(unix)]
+fn uuid_like() -> String {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    N.fetch_add(1, Ordering::Relaxed).to_string()
+}
+
+/// A copy of the built binary that self-update may replace, with its own home.
+#[cfg(unix)]
+fn installed_copy(root: &Path) -> (PathBuf, PathBuf) {
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join("tincan");
+    std::fs::copy(BIN, &exe).unwrap();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    (exe, home)
+}
+
+/// Linux refuses to exec a file another thread's forked child still holds open for writing
+/// (ETXTBSY), which a freshly copied binary hits while other tests spawn processes.
+#[cfg(unix)]
+fn output_retrying(cmd: &mut Command) -> std::process::Output {
+    for _ in 0..50 {
+        match cmd.output() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other.unwrap(),
+        }
+    }
+    panic!("still ETXTBSY")
+}
+
+#[cfg(unix)]
+fn run_bin(exe: &Path, home: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, Value) {
+    let mut cmd = clean_command_for(exe);
+    cmd.env("HOME", home).args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = output_retrying(cmd.stdin(Stdio::null()));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json = stdout
+        .lines()
+        .next()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("bad JSON {l:?}: {e}")))
+        .unwrap_or(Value::Null);
+    (out.status.code().unwrap_or(-1), json)
+}
+
+#[cfg(unix)]
+fn version_of(exe: &Path) -> String {
+    let out = output_retrying(Command::new(exe).arg("--version"));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn self_update_check_reports_without_installing() {
+    let (url, root) = fake_release("9.9.9", "tincan 9.9.9", false);
+    let (exe, home) = installed_copy(&root);
+    let before = version_of(&exe);
+    let (rc, o) = run_bin(
+        &exe,
+        &home,
+        &["self-update", "--check"],
+        &[("TINCAN_RELEASES_URL", &url)],
+    );
+    assert_eq!(rc, 0, "{o}");
+    assert_eq!(o["latest"], "9.9.9");
+    assert_eq!(o["update_available"], true);
+    assert_eq!(o["updated"], false);
+    assert_eq!(version_of(&exe), before);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn self_update_installs_a_verified_release() {
+    let (url, root) = fake_release("9.9.9", "tincan 9.9.9", false);
+    let (exe, home) = installed_copy(&root);
+    let (rc, o) = run_bin(
+        &exe,
+        &home,
+        &["self-update"],
+        &[("TINCAN_RELEASES_URL", &url)],
+    );
+    assert_eq!(rc, 0, "{o}");
+    assert_eq!(o["updated"], true, "{o}");
+    assert_eq!(o["verified"], "checksum");
+    assert_eq!(version_of(&exe), "tincan 9.9.9");
+    let leftovers: Vec<_> = std::fs::read_dir(exe.parent().unwrap())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".tincan-update")
+        })
+        .collect();
+    assert!(leftovers.is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn self_update_refuses_a_bad_checksum_or_a_mislabeled_binary() {
+    for (sum_bad, reports, expect) in [
+        (true, "tincan 9.9.9", "checksum mismatch"),
+        (false, "tincan 6.6.6", "expected \"tincan 9.9.9\""),
+    ] {
+        let (url, root) = fake_release("9.9.9", reports, sum_bad);
+        let (exe, home) = installed_copy(&root);
+        let before = version_of(&exe);
+        let (rc, o) = run_bin(
+            &exe,
+            &home,
+            &["self-update"],
+            &[("TINCAN_RELEASES_URL", &url)],
+        );
+        assert_ne!(rc, 0, "{o}");
+        assert!(o["message"].as_str().unwrap_or("").contains(expect), "{o}");
+        assert_eq!(version_of(&exe), before);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn self_update_is_a_no_op_when_current() {
+    let current = env!("CARGO_PKG_VERSION");
+    let (url, root) = fake_release(current, &format!("tincan {current}"), false);
+    let (exe, home) = installed_copy(&root);
+    let (rc, o) = run_bin(
+        &exe,
+        &home,
+        &["self-update"],
+        &[("TINCAN_RELEASES_URL", &url)],
+    );
+    assert_eq!(rc, 0, "{o}");
+    assert_eq!(o["update_available"], false);
+    assert_eq!(o["updated"], false);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn session_start_announces_a_release_found_by_the_background_check() {
+    let (url, root) = fake_release("9.9.9", "tincan 9.9.9", false);
+    let (exe, home) = installed_copy(&root);
+    let env = [
+        ("TINCAN_RELEASES_URL", url.as_str()),
+        ("TINCAN_UPDATES", "notify"),
+    ];
+    let state = home.join(".config/tincan/update-check.json");
+    // First session start: no state yet, so it starts a background check and says nothing.
+    let (_, o) = run_bin(&exe, &home, &["hook", "--event", "SessionStart"], &env);
+    assert!(!o.to_string().contains("is available"), "{o}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !std::fs::read_to_string(&state).is_ok_and(|t| t.contains("9.9.9")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background check never wrote {state:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // notify mode never installs.
+    assert_ne!(version_of(&exe), "tincan 9.9.9");
+    let (_, o) = run_bin(&exe, &home, &["hook", "--event", "SessionStart"], &env);
+    assert!(o.to_string().contains("tincan 9.9.9 is available"), "{o}");
+    // Not for off, and never inside a tincan-launched session.
+    for extra in [("TINCAN_UPDATES", "off"), ("TINCAN_LAUNCHED", "1")] {
+        let mut env = env.to_vec();
+        env.push(extra);
+        let (_, o) = run_bin(&exe, &home, &["hook", "--event", "SessionStart"], &env);
+        assert!(!o.to_string().contains("is available"), "{extra:?}: {o}");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_updates_install_in_the_background() {
+    let (url, root) = fake_release("9.9.9", "tincan 9.9.9", false);
+    let (exe, home) = installed_copy(&root);
+    let env = [
+        ("TINCAN_RELEASES_URL", url.as_str()),
+        ("TINCAN_UPDATES", "auto"),
+    ];
+    run_bin(&exe, &home, &["hook", "--event", "SessionStart"], &env);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while version_of(&exe) != "tincan 9.9.9" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "auto update never installed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let state = home.join(".config/tincan/update-check.json");
+    while !std::fs::read_to_string(&state).is_ok_and(|t| t.contains("updated_from")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "auto update never recorded"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // The stand-in can't run hooks: put the real binary back and pretend it came from 0.0.1.
+    std::fs::copy(BIN, &exe).unwrap();
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+    v["updated_from"] = json!("0.0.1");
+    v["latest"] = json!(env!("CARGO_PKG_VERSION"));
+    std::fs::write(&state, v.to_string()).unwrap();
+    let (_, o) = run_bin(&exe, &home, &["hook", "--event", "SessionStart"], &env);
+    let want = format!("updated itself from 0.0.1 to {}", env!("CARGO_PKG_VERSION"));
+    assert!(o.to_string().contains(&want), "{o}");
+    let (_, o) = run_bin(&exe, &home, &["hook", "--event", "SessionStart"], &env);
+    assert!(!o.to_string().contains("updated itself"), "only once: {o}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn updates_setting_is_reported_and_validated() {
+    let (_, o) = exec(
+        None,
+        &["extensions"],
+        Opts {
+            env: &[("TINCAN_UPDATES", "auto")],
+            ..Opts::default()
+        },
+    );
+    assert_eq!(o["updates"], "auto", "{o}");
+    let (_, o) = exec(
+        None,
+        &["extensions"],
+        Opts {
+            env: &[("TINCAN_UPDATES", "sometimes")],
+            ..Opts::default()
+        },
+    );
+    assert_eq!(o["ok"], false, "{o}");
+    assert_eq!(o["updates"], "notify", "{o}");
+}
+
+#[test]
+fn launched_sessions_cannot_self_update() {
+    let (rc, o) = exec(
+        None,
+        &["self-update"],
+        Opts {
+            env: &[("TINCAN_LAUNCHED", "1")],
+            ..Opts::default()
+        },
+    );
+    assert_ne!(rc, 0);
+    assert!(
+        o["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("self-update is unavailable"),
+        "{o}"
+    );
+}
+
+#[test]
+fn check_and_background_are_exclusive() {
+    let (rc, o) = exec(
+        None,
+        &["self-update", "--check", "--background"],
+        Opts::default(),
+    );
+    assert_ne!(rc, 0, "{o}");
+}
+
+/// An archive under `latest/` that differs from the checked version is never fetched.
+#[cfg(unix)]
+#[test]
+fn self_update_downloads_the_version_it_checked() {
+    let (url, root) = fake_release("9.9.9", "tincan 9.9.9", false);
+    let latest = root.join("latest/download");
+    for entry in std::fs::read_dir(root.join("download/v9.9.9")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::write(latest.join(entry.file_name()), "wrong release").unwrap();
+    }
+    let (exe, home) = installed_copy(&root);
+    let (rc, o) = run_bin(
+        &exe,
+        &home,
+        &["self-update"],
+        &[("TINCAN_RELEASES_URL", &url)],
+    );
+    assert_eq!(rc, 0, "{o}");
+    assert_eq!(version_of(&exe), "tincan 9.9.9");
+    let _ = std::fs::remove_dir_all(root);
 }

@@ -33,7 +33,19 @@ irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex
 
 Release artifacts carry GitHub build-provenance attestations. When an authenticated GitHub CLI is available, the installers verify that provenance automatically; otherwise they print that only the same-release checksum was verified. You can verify a downloaded archive manually with `gh attestation verify <archive> --repo allentong/tincan --signer-workflow allentong/tincan/.github/workflows/release.yml`.
 
-**Update:** rerun `cargo install --git https://github.com/allentong/tincan --force`, then `tincan install-skills`.
+**Update:** `tincan self-update` installs the latest release over the running binary and refreshes the skill (`--check` only reports). Like the installers, it verifies the release checksum, and build provenance when `gh` is authenticated. Before the first release, rerun `cargo install --git https://github.com/allentong/tincan --force`, then `tincan install-skills`.
+
+Agent sessions check for a release once a day, in the background from the SessionStart hook. Pick what happens in `~/.config/tincan/config.json` (or `$TINCAN_UPDATES`):
+
+```json
+{"updates": "notify"}
+```
+
+- `notify` (default): the agent tells you a new version is out.
+- `auto`: it's installed in the background without asking; the next session runs it, and the agent tells you once that tincan updated.
+- `off`: no checks.
+
+Sessions tincan launches never check or update. The Claude Code plugin (skill and hooks) updates separately: turn on auto-update for the tincan marketplace in `/plugin`.
 
 ## Supported
 
@@ -220,7 +232,7 @@ cargo test --test live broadcast -- --ignored --nocapture   # one question to ev
 
 Live harnesses are listed in `tests/live/harnesses.json`. Entries whose binary or API key is missing are skipped; `TINCAN_LIVE=codex,claude` picks a subset.
 
-Releases: push a `v*` tag and the release workflow builds and uploads the binaries `install.sh` fetches.
+Releases are automated with [release-please](https://github.com/googleapis/release-please). Merging to `main` keeps a Release PR up to date: it bumps the version in `Cargo.toml`, `Cargo.lock` and the plugin manifests, and writes `CHANGELOG.md` from the conventional commits. Merging that PR tags `vX.Y.Z` and creates the GitHub release, and the release workflow attaches the binaries `install.sh` and `tincan self-update` fetch. Don't edit versions or push tags by hand.
 
 ## License
 

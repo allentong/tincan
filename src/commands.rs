@@ -3,7 +3,7 @@ use crate::identity::{
     self, LazyCaller, PEER_COLS, Peer, PeerState, me, peer_from_row, touch, whoami,
 };
 use crate::store::{connect, create_private_file, now, resolve_team, resolve_workspace};
-use crate::{Cli, Cmd, harness, hooks, wake};
+use crate::{Cli, Cmd, harness, hooks, update, wake};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -52,6 +52,7 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
         Cmd::Hooks { harness } => hooks::config(&harness),
         Cmd::Extensions => Ok(Some(extensions())),
         Cmd::InstallSkills => install_skills(),
+        Cmd::SelfUpdate { check, background } => update::self_update(check, background),
         cmd => {
             let (dir, db) = resolve_team(team, false)?;
             let mut conn = connect(&db)?;
@@ -144,7 +145,8 @@ pub fn run(cli: Cli) -> Result<Option<Value>> {
                 | Cmd::Hook { .. }
                 | Cmd::Hooks { .. }
                 | Cmd::Extensions
-                | Cmd::InstallSkills => {
+                | Cmd::InstallSkills
+                | Cmd::SelfUpdate { .. } => {
                     unreachable!()
                 }
             }
@@ -208,6 +210,7 @@ fn restrict_launched_session(cli: &Cli) -> Result<()> {
         Cmd::Hooks { .. } => Some("hooks"),
         Cmd::Extensions => Some("extensions"),
         Cmd::InstallSkills => Some("install-skills"),
+        Cmd::SelfUpdate { .. } => Some("self-update"),
         Cmd::Send { new: true, .. } => Some("send --new"),
         _ => None,
     };
@@ -225,13 +228,15 @@ fn extensions() -> Value {
     let (drivers, mut errors) = wake::load();
     let (profiles, harness_errors) = harness::load_with_errors();
     errors.extend(harness_errors);
+    let (updates, update_error) = update::mode();
+    errors.extend(update_error);
     let harnesses: Vec<Value> = profiles
         .iter()
         .map(|p| json!({"name": p.name, "process_names": p.process_names, "hooks_file": p.hooks_file}))
         .collect();
     let mut wake: Vec<Value> = drivers.iter().map(wake::Driver::describe).collect();
     wake.push(json!({"name": "cmd", "builtin": true, "detect_env": null, "busy_check": false}));
-    json!({"ok": errors.is_empty(), "harnesses": harnesses, "wake": wake, "errors": errors})
+    json!({"ok": errors.is_empty(), "harnesses": harnesses, "wake": wake, "updates": updates.name(), "errors": errors})
 }
 
 fn register(

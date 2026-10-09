@@ -8,6 +8,7 @@ mod harness;
 mod hooks;
 mod identity;
 mod store;
+mod update;
 mod wake;
 
 use clap::{Parser, Subcommand};
@@ -132,6 +133,15 @@ pub enum Cmd {
     },
     /// Install the tincan skill for Claude Code, Codex and Grok (the installers run this)
     InstallSkills,
+    /// Update this binary to the latest release (checksum-verified). Set "updates" in
+    /// ~/.config/tincan/config.json (or TINCAN_UPDATES) to notify (default), auto or off
+    SelfUpdate {
+        /// Only report whether a newer release exists
+        #[arg(long)]
+        check: bool,
+        #[arg(long, hide = true, conflicts_with = "check")]
+        background: bool,
+    },
 }
 
 fn main() {
