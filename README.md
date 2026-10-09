@@ -42,7 +42,7 @@ Agent sessions check for a release once a day, in the background from the Sessio
 ```
 
 - `notify` (default): the agent tells you a new version is out.
-- `auto`: it's installed in the background; the next session runs it.
+- `auto`: it's installed in the background without asking; the next session runs it, and the agent tells you once that tincan updated.
 - `off`: no checks.
 
 Sessions tincan launches never check or update. The Claude Code plugin (skill and hooks) updates separately: turn on auto-update for the tincan marketplace in `/plugin`.

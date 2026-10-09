@@ -2702,6 +2702,25 @@ fn auto_updates_install_in_the_background() {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    let state = home.join(".config/tincan/update-check.json");
+    while !std::fs::read_to_string(&state).is_ok_and(|t| t.contains("updated_from")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "auto update never recorded"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // The stand-in can't run hooks: put the real binary back and pretend it came from 0.0.1.
+    std::fs::copy(BIN, &exe).unwrap();
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+    v["updated_from"] = json!("0.0.1");
+    v["latest"] = json!(env!("CARGO_PKG_VERSION"));
+    std::fs::write(&state, v.to_string()).unwrap();
+    let (_, o) = run_bin(&exe, &home, &["hook", "--event", "SessionStart"], &env);
+    let want = format!("updated itself from 0.0.1 to {}", env!("CARGO_PKG_VERSION"));
+    assert!(o.to_string().contains(&want), "{o}");
+    let (_, o) = run_bin(&exe, &home, &["hook", "--event", "SessionStart"], &env);
+    assert!(!o.to_string().contains("updated itself"), "only once: {o}");
     let _ = std::fs::remove_dir_all(root);
 }
 

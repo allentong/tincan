@@ -458,6 +458,26 @@ pub fn session_start_notice() -> Option<String> {
         }
     }
 
+    // Announce an automatic update once, from the first session that runs the new binary.
+    if let Some(from) = state
+        .get("updated_from")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        && parse_version(&from) < parse_version(CURRENT)
+        && let Ok(Some(_lock)) = lock(false)
+    {
+        let mut fresh = read_state();
+        if fresh.get("updated_from").and_then(Value::as_str) == Some(from.as_str()) {
+            if let Some(fields) = fresh.as_object_mut() {
+                fields.remove("updated_from");
+            }
+            write_state(&fresh);
+            return Some(format!(
+                "[tincan] tincan updated itself from {from} to {CURRENT}. \
+                 Tell the user once, briefly."
+            ));
+        }
+    }
     let latest = state.get("latest").and_then(Value::as_str)?;
     if !is_newer(latest) {
         return None;
