@@ -4,7 +4,7 @@
 
 Let your coding agents talk to each other. `tincan` is a small local CLI that lets Claude Code, Codex, Grok, opencode and other agent sessions on the same machine send each other messages, so you stop being the copy-paste bus between terminals.
 
-- **One binary, no daemon, no network.** A team is one SQLite file in `<project>/.tincan/`.
+- **One binary, no daemon, no network.** A team is one SQLite file in your home directory.
 - **Fast.** About 9 ms per command.
 - **Store-and-forward only.** Message bodies are held until the recipient reads them, then erased. Routing metadata (sender, recipients, times) is kept for an hour for replies and dedup. `.tincan/` is git-ignored and owner-only.
 - **At-least-once delivery.** Leased reads, optional explicit ack, idempotent sends.
@@ -73,7 +73,7 @@ Cloud-hosted agents (Grok Bot, cloud sandboxes, CI) aren't supported: the skill 
 
 **Direct pairs.** Claude Code ↔ Codex, Claude Code ↔ Grok and Codex ↔ Grok each sent a question and got the answer back, in both directions, with Codex running as an interactive TUI in cmux.
 
-**Zero-config.** In fresh git repos with no `init` or `register`: `claude -p` and `codex exec` each auto-joined (team created at the repo root, sessions named `claude` and `codex`), and Claude asked Codex a question and got the answer. The same worked from the Claude desktop app (Code tab) running in a git worktree: it joined the main checkout's team and got Codex's reply.
+**Zero-config.** In fresh git repos with no `init` or `register`: `claude -p` and `codex exec` each auto-joined (sessions named `claude` and `codex`), and Claude asked Codex a question and got the answer. The same worked from the Claude desktop app (Code tab) running in a git worktree: it reached Codex and got its reply.
 
 **Terminal wake.** cmux (Codex TUI), tmux 3.7 (Grok TUI) and herdr were tested with real sessions: an idle pane gets the nudge, and a pane mid-turn is skipped (`busy`) rather than typed over. The `cmd:` driver is covered by the test suite.
 
@@ -93,7 +93,7 @@ Install once (one command, above), then just ask an agent: "message codex and as
 
 There is no setup step. The first time a session uses tincan (or starts, if hooks are installed):
 
-- **Team:** `.tincan/` is created at the git repo root, git-ignored and owner-only. Every session in the repo, including its worktrees, shares it. Each peer also records its actual workspace, and a headless helper starts in the sender's worktree rather than the shared main checkout. Outside a repo, sessions share a per-user default team (`~/.local/share/tincan/default`; Windows `%LOCALAPPDATA%\tincan\default`) while helpers start in the sender's working directory.
+- **Team:** every session on your machine shares one team in `~/.local/share/tincan/default` (Windows `%LOCALAPPDATA%\tincan\default`), owner-only. Nothing is written to your projects. Each peer records its workspace (repo or worktree), and sending to a harness name reaches a session in the same workspace or starts a headless one there.
 - **Name:** the session registers under its harness name, `claude`, `codex` or `grok`. A second live Claude session gets `claude-2`. When an outermost PID-bound session auto-registers with a unique supported terminal target such as tmux or cmux, it also records that pane or surface so new mail can wake the idle session. Nested agents never claim the outer harness's terminal.
 - **Confirmation:** the command's output carries a `setup` field saying what was created and the name taken, and the skill tells the agent to relay it to you.
 
@@ -104,7 +104,7 @@ tincan inbox                                  # in the Codex session
 tincan reply <id> -                           # body is read from stdin
 ```
 
-**Asking an agent that isn't running.** Send to its harness name anyway. tincan starts a quick headless session (`claude -p`, `codex exec`, `grok -p`) in the team dir, and it answers and exits:
+**Asking an agent that isn't running.** Send to its harness name anyway. tincan starts a quick headless session (`claude -p`, `codex exec`, `grok -p`) in your workspace, and it answers and exits:
 
 ```sh
 tincan send codex "What does src/auth.rs do on token expiry?"   # result has "launched"
@@ -112,7 +112,7 @@ tincan wait --replies-to <id>                                   # returns once c
 tincan inbox
 ```
 
-The quick session reads the question with `tincan inbox` and replies with `tincan reply`. It can do work, not just answer. Codex's runs in its `workspace-write` sandbox. Claude's may edit files and run a fixed list of non-privileged tincan commands, local `git` without push, and `cargo`/`npm`/`pnpm`/`pytest`/`go` build and test; anything else, including network access, is denied. A launched session cannot override its role/team, change tincan configuration, or start another session. It receives only path, locale, platform runtime, and explicitly configured environment variables. Because it takes direction from another agent rather than from you, override `launch` or `pass_env` for `claude` in `harnesses.json` only when the added capability is trusted. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
+The quick session reads the question with `tincan inbox` and replies with `tincan reply`. It can do work, not just answer. Codex's runs in its `workspace-write` sandbox. Claude's may edit files and run a fixed list of non-privileged tincan commands, local `git` without push, and `cargo`/`npm`/`pnpm`/`pytest`/`go` build and test; anything else, including network access, is denied. A launched session cannot override its role/team, change tincan configuration, or start another session. It receives only path, locale, platform runtime, and explicitly configured environment variables. Because it takes direction from another agent rather than from you, override `launch` or `pass_env` for `claude` in `harnesses.json` only when the added capability is trusted. It uses your existing CLI login, logs to `launch-<role>.log` in the team's `.tincan/`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
 
 **Keeping it for follow-ups.** With `--stay`, the started session answers or does the task, can ask the sender questions (`tincan send <sender> "…"`), and waits for more. It ends when told it's done, or when the sender's session ends. Follow-ups go to it by name, with its context intact. `--new` starts a fresh session under the next free name (`claude-2`) even when one is running.
 
@@ -123,7 +123,7 @@ tincan send claude "Good. Now check the rollback section"     # same session, sa
 tincan send claude "You're done, thanks" --no-reply
 ```
 
-Optional: `tincan register reviewer` for a custom name, `--as ROLE` / `TINCAN_ROLE` to act as one, `--team-dir` / `TINCAN_TEAM_DIR` or `tincan init` (current dir) to pick a different team. Plain shells and scripts aren't agent sessions, so they don't auto-register: use `register` or `--as`.
+Optional: `tincan register reviewer` for a custom name, `--as ROLE` / `TINCAN_ROLE` to act as one, `--team-dir` / `TINCAN_TEAM_DIR` or `tincan init` (a separate team for the current directory and below) to pick a different team. Plain shells and scripts aren't agent sessions, so they don't auto-register: use `register` or `--as`.
 
 Every command prints one JSON line and uses stable exit codes, so agents can parse the result. (`tincan hook` is the exception: it prints nothing when there's nothing to tell the agent.)
 

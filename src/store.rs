@@ -34,8 +34,7 @@ pub fn now() -> f64 {
 }
 
 /// Team dir precedence: --team-dir, then TINCAN_TEAM_DIR, then the nearest ancestor holding `.tincan/`,
-/// then (created on first use) the git repo root, or a per-user default team outside any repo.
-/// `init` alone uses the cwd instead of the repo root.
+/// then (created on first use) the per-user default team. `init` alone uses the cwd instead.
 pub fn resolve_team(flag: Option<&str>, init: bool) -> Result<(PathBuf, PathBuf)> {
     let dir = match flag
         .map(PathBuf::from)
@@ -49,8 +48,7 @@ pub fn resolve_team(flag: Option<&str>, init: bool) -> Result<(PathBuf, PathBuf)
             match find_upwards(&cwd)? {
                 Some(d) => d,
                 None if init => cwd,
-                None => git_root(&cwd)
-                    .or_else(default_team)
+                None => default_team()
                     .ok_or_else(|| TincanError::new(Code::NoTeam, "no team dir and no home dir"))?,
             }
         }
@@ -73,10 +71,7 @@ pub fn resolve_team(flag: Option<&str>, init: bool) -> Result<(PathBuf, PathBuf)
             create_private_dir(&tincan_dir)
                 .and_then(|_| std::fs::write(tincan_dir.join(".gitignore"), "*\n"))
                 .map_err(|e| TincanError::new(Code::NoTeam, e.to_string()))?;
-            note(format!(
-                "Created team at {} (git-ignored).",
-                tincan_dir.display()
-            ));
+            note(format!("Created team at {}.", tincan_dir.display()));
         }
         Err(e) => return Err(TincanError::new(Code::NoTeam, e.to_string())),
     }
@@ -135,31 +130,7 @@ fn find_upwards(start: &Path) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-/// The repo's main checkout, so sessions in any of its worktrees share one team.
-fn git_root(start: &Path) -> Option<PathBuf> {
-    let root = start.ancestors().find(|d| d.join(".git").exists())?;
-    let dotgit = root.join(".git");
-    if dotgit.is_file() {
-        // A worktree: `.git` holds `gitdir: <main>/.git/worktrees/<name>`.
-        let text = std::fs::read_to_string(&dotgit).ok()?;
-        let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
-        let gitdir = if gitdir.is_absolute() {
-            gitdir
-        } else {
-            root.join(gitdir)
-        };
-        if let Some(main) = gitdir
-            .ancestors()
-            .find(|a| a.file_name().is_some_and(|n| n == ".git"))
-            .and_then(Path::parent)
-        {
-            return Some(main.to_path_buf());
-        }
-    }
-    Some(root.to_path_buf())
-}
-
-/// Outside any repo: `~/.local/share/tincan/default` (Windows: `%LOCALAPPDATA%\tincan\default`).
+/// The per-user team: `~/.local/share/tincan/default` (Windows: `%LOCALAPPDATA%\tincan\default`).
 fn default_team() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty()) {
         return Some(Path::new(&d).join("tincan").join("default"));

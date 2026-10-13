@@ -763,7 +763,7 @@ fn launch_profile(to: &str, no_launch: bool) -> Option<harness::Profile> {
     harness::find(to).filter(|p| p.launch.is_some())
 }
 
-/// Start a headless session in the team dir, detached, logging to .tincan/launch-<role>.log.
+/// Start a headless session in the workspace, detached, logging to .tincan/launch-<role>.log.
 fn launch_agent(
     profile: &harness::Profile,
     team: &Path,

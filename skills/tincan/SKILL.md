@@ -7,7 +7,7 @@ description: Message other agent sessions (Claude Code, Codex, Grok) on the same
 
 `tincan` is a local CLI. Every command prints one JSON object; a non-zero exit means `{"ok":false,"error":...}`.
 
-Setup is automatic: there is nothing to init or register. The team is the git repo root (worktrees share it; outside a repo, a per-user default team). Your session joins on its first tincan command, or at session start via hooks, named after its harness (`claude`, `codex`, `grok`; `claude-2` if taken). An outermost PID-bound session also records a unique supported terminal wake target when one is detected; nested agents never claim the outer harness's terminal. Override with `--as ROLE` / `TINCAN_ROLE` or `--team-dir` / `TINCAN_TEAM_DIR`.
+Setup is automatic: there is nothing to init or register. Every local session shares one per-user team (nothing is written to the project). Your session joins on its first tincan command, or at session start via hooks, named after its harness (`claude`, `codex`, `grok`; `claude-2` if taken). An outermost PID-bound session also records a unique supported terminal wake target when one is detected; nested agents never claim the outer harness's terminal. Override with `--as ROLE` / `TINCAN_ROLE` or `--team-dir` / `TINCAN_TEAM_DIR`.
 
 ## Getting started
 
@@ -21,7 +21,7 @@ Run `tincan peers` first and follow the result:
 - **The agent you want isn't listed:** send to its harness name anyway (`claude`, `codex`, `grok`). tincan starts a quick headless session that answers and exits; the result has a `launched` field. Then run `tincan wait --replies-to <id> --timeout 300` and read the answer with `tincan inbox`.
 - **`not_registered`:** tincan couldn't tell this is an agent session (e.g. a sandbox hid the process tree). Run `tincan register <name>` with your harness name.
 
-**Local only.** Every peer runs on the same machine as the team dir. Cloud and remote sessions (a hosted Grok Bot, a cloud sandbox, CI) are not supported. If you are one of those, tell the user: "tincan only works for sessions running locally on the machine with the team dir; please run me locally in the project directory." Then stop, and don't pass messages some other way.
+**Local only.** Every peer runs on the same machine as the team dir. Cloud and remote sessions (a hosted Grok Bot, a cloud sandbox, CI) are not supported. If you are one of those, tell the user: "tincan only works for sessions running locally on the machine with the team dir; please run me locally." Then stop, and don't pass messages some other way.
 
 | Do | Command |
 | --- | --- |
