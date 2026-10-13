@@ -1250,15 +1250,38 @@ const SKILLS: &[(&str, &str)] = &[
 /// (`~/.claude/skills`) look for them. Skips Claude when the plugin carries its own copies.
 fn install_skills() -> Result<Option<Value>> {
     let home = harness::home().ok_or_else(|| TincanError::new(Code::Usage, "no home dir"))?;
+    let env_dir = |var: &str, default: &str| {
+        std::env::var_os(var)
+            .filter(|d| !d.is_empty())
+            .map_or_else(|| home.join(default), PathBuf::from)
+    };
+    // Install only for agents this machine has: each creates its config dir on first run.
+    let claude = env_dir("CLAUDE_CONFIG_DIR", ".claude");
+    let agents = [
+        ("Claude Code", claude.clone(), claude.join("skills")),
+        (
+            "Codex",
+            env_dir("CODEX_HOME", ".codex"),
+            home.join(".agents/skills"),
+        ),
+        ("Grok", home.join(".grok"), home.join(".agents/skills")),
+    ];
     let mut installed = vec![];
     let mut skipped = vec![];
-    let targets = [
-        ("codex, grok", home.join(".agents/skills")),
-        ("claude", home.join(".claude/skills")),
-    ];
-    for (who, root) in targets {
-        if who == "claude" && home.join(".claude/plugins/cache/tincan").is_dir() {
+    let mut done: Vec<PathBuf> = vec![];
+    let mut names = vec![];
+    for (who, config, root) in agents {
+        if !config.is_dir() {
+            skipped.push(json!({"for": who, "reason": "not installed"}));
+            continue;
+        }
+        if who == "Claude Code" && claude.join("plugins/cache/tincan").is_dir() {
             skipped.push(json!({"for": who, "reason": "the tincan plugin is installed"}));
+            continue;
+        }
+        names.push(who);
+        // Codex and Grok share ~/.agents/skills.
+        if done.contains(&root) {
             continue;
         }
         for (name, text) in SKILLS {
@@ -1276,10 +1299,22 @@ fn install_skills() -> Result<Option<Value>> {
             std::fs::create_dir_all(&dir)
                 .and_then(|_| std::fs::write(dir.join("SKILL.md"), text))
                 .map_err(|e| TincanError::new(Code::Usage, format!("{}: {e}", dir.display())))?;
-            installed.push(json!({"for": who, "path": dir.join("SKILL.md")}));
+            installed.push(json!({"path": dir.join("SKILL.md")}));
         }
+        done.push(root);
     }
+    let summary = match names.as_slice() {
+        [] => {
+            "No Claude Code, Codex or Grok found; run `tincan install-skills` after installing one."
+                .to_string()
+        }
+        [one] => format!("Installed the tincan skills for {one}."),
+        [rest @ .., last] => format!(
+            "Installed the tincan skills for {} and {last}.",
+            rest.join(", ")
+        ),
+    };
     Ok(Some(
-        json!({"ok": true, "installed": installed, "skipped": skipped}),
+        json!({"ok": true, "summary": summary, "installed": installed, "skipped": skipped}),
     ))
 }

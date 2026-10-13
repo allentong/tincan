@@ -39,9 +39,9 @@ try {
   Copy-Item -Force (Join-Path $tmp 'tincan.exe') (Join-Path $dir 'tincan.exe')
   $version = & (Join-Path $dir 'tincan.exe') --version
   Write-Host "Installed $version to $dir\tincan.exe"
-  # The skill ships in the binary: put it where Claude Code, Codex and Grok look for skills.
-  & (Join-Path $dir 'tincan.exe') install-skills | Out-Null
-  if ($LASTEXITCODE -eq 0) { Write-Host "Installed the tincan skill for Claude Code, Codex and Grok" }
+  # The skills ship in the binary: install them for each agent found on this machine.
+  $skills = & (Join-Path $dir 'tincan.exe') install-skills | ConvertFrom-Json
+  Write-Host $skills.summary
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
   if (-not (($env:Path + ';' + $userPath).Split(';') -contains $dir)) {
     if ($env:TINCAN_NO_MODIFY_PATH) {
