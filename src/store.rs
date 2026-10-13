@@ -49,9 +49,15 @@ pub fn resolve_team(flag: Option<&str>, init: bool) -> Result<(PathBuf, PathBuf)
             match find_upwards(&cwd)? {
                 Some(d) => d,
                 None if init => cwd,
-                None => git_root(&cwd)
-                    .map_or_else(default_team, |root| repo_team(&root))
-                    .ok_or_else(|| TincanError::new(Code::NoTeam, "no team dir and no home dir"))?,
+                None => match git_root(&cwd) {
+                    // A team 0.1.0 made in the main checkout stays shared with its worktrees.
+                    Some(root) if find_upwards(&root)?.as_ref() == Some(&root) => root,
+                    root => root
+                        .map_or_else(default_team, |root| repo_team(&root))
+                        .ok_or_else(|| {
+                            TincanError::new(Code::NoTeam, "no team dir and no home dir")
+                        })?,
+                },
             }
         }
     };

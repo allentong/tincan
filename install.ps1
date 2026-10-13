@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 
 $repo = 'allentong/tincan'
-$dir = if ($env:TINCAN_INSTALL_DIR) { $env:TINCAN_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'tincan\bin' }
+$dir = [IO.Path]::GetFullPath($(if ($env:TINCAN_INSTALL_DIR) { $env:TINCAN_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'tincan\bin' }))
 
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
   'AMD64' { 'x86_64' }

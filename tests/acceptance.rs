@@ -1670,6 +1670,39 @@ fn worktrees_share_the_main_checkout_team() {
 }
 
 #[test]
+fn worktrees_keep_a_team_left_in_the_main_checkout() {
+    let d = TmpDir::new();
+    let main = d.0.join("repo");
+    std::fs::create_dir_all(main.join(".git/worktrees/feat")).unwrap();
+    std::fs::create_dir_all(main.join(".tincan")).unwrap();
+    let wt = d.0.join("repo-feat");
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(
+        wt.join(".git"),
+        format!("gitdir: {}\n", main.join(".git/worktrees/feat").display()),
+    )
+    .unwrap();
+    let home = home_vars(&d.0);
+    let env = vars(&home);
+    let at = |cwd: &Path, args: &[&str]| {
+        exec(
+            None,
+            args,
+            Opts {
+                env: &env,
+                cwd: Some(cwd),
+                ..Opts::default()
+            },
+        )
+    };
+    assert_eq!(at(&main, &["register", "alpha", "--pid", "0"]).0, 0);
+    let (rc, o) = at(&wt, &["peers"]);
+    assert_eq!(rc, 0, "{o}");
+    assert!(o.to_string().contains("\"alpha\""), "{o}");
+    assert!(!d.0.join("home/appdata/tincan/repos").exists());
+}
+
+#[test]
 fn different_repos_get_separate_teams() {
     let d = TmpDir::new();
     let (a, b) = (d.0.join("repo-a"), d.0.join("repo-b"));

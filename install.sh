@@ -34,6 +34,7 @@ else
 fi
 tar -xzf "$tmp/$asset" -C "$tmp"
 mkdir -p "$dir"
+dir="$(cd "$dir" && pwd)"
 install -m 755 "$tmp/tincan" "$dir/tincan"
 echo "Installed $("$dir/tincan" --version) to $dir/tincan"
 # The skills ship in the binary: install them for each agent found on this machine.
@@ -46,22 +47,30 @@ case ":$PATH:" in
       echo "Add $dir to your PATH."
       exit 0
     fi
-    line="export PATH=\"$dir:\$PATH\""
+    # Quote $dir as a literal so the rc file never evaluates anything in the path.
+    q="$(printf '%s' "$dir" | sed "s/'/'\\\\''/g")"
+    line="export PATH='$q':\"\$PATH\""
     case "$(basename "${SHELL:-sh}")" in
-      zsh) rcs="${ZDOTDIR:-$HOME}/.zshrc" ;;
-      bash) if [ "$os" = apple-darwin ]; then rcs="$HOME/.bash_profile"; else rcs="$HOME/.bashrc"; fi ;;
-      fish) rcs="" line="fish_add_path $dir"
-        mkdir -p "$HOME/.config/fish/conf.d"
-        echo "$line" > "$HOME/.config/fish/conf.d/tincan.fish"
-        echo "Added $dir to PATH in ~/.config/fish/conf.d/tincan.fish" ;;
-      *) rcs="$HOME/.profile" ;;
+      zsh) rc="${ZDOTDIR:-$HOME}/.zshrc" ;;
+      bash)
+        rc="$HOME/.bashrc"
+        if [ "$os" = apple-darwin ]; then
+          # Login shells read only the first of these that exists.
+          rc="$HOME/.bash_profile"
+          for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+            if [ -f "$f" ]; then rc="$f"; break; fi
+          done
+        fi ;;
+      fish)
+        rc="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/tincan.fish"
+        mkdir -p "$(dirname "$rc")"
+        line="fish_add_path '$(printf '%s' "$dir" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")'" ;;
+      *) rc="$HOME/.profile" ;;
     esac
-    for rc in $rcs; do
-      if ! grep -qsF "$line" "$rc"; then
-        printf '\n# tincan\n%s\n' "$line" >> "$rc"
-        echo "Added $dir to PATH in $rc"
-      fi
-    done
-    echo "Open a new terminal (or run: $line) to use tincan."
+    if ! grep -qsF "$line" "$rc"; then
+      printf '\n# tincan\n%s\n' "$line" >> "$rc"
+      printf 'Added %s to PATH in %s\n' "$dir" "$rc"
+    fi
+    printf 'Open a new terminal (or run: %s) to use tincan.\n' "$line"
     ;;
 esac
