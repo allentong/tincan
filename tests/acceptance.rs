@@ -2128,7 +2128,11 @@ fn bad_roles_and_durations_rejected() {
 fn install_skills_installs_for_the_agents_on_this_machine() {
     let d = TmpDir::new();
     let home = d.0.to_string_lossy().into_owned();
-    let env = [("HOME", home.as_str()), ("USERPROFILE", home.as_str())];
+    let env = [
+        ("HOME", home.as_str()),
+        ("USERPROFILE", home.as_str()),
+        ("LOCALAPPDATA", ""),
+    ];
     let opts = Opts {
         env: &env,
         ..Opts::default()
@@ -2145,8 +2149,9 @@ fn install_skills_installs_for_the_agents_on_this_machine() {
     // Codex only: the shared agents dir, not Claude's
     std::fs::create_dir_all(d.0.join(".codex")).unwrap();
     let (_, o) = exec(None, &["install-skills"], opts);
-    assert_eq!(
-        o["summary"], "Installed the tincan skills for Codex.",
+    let summary = o["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("Installed the tincan skills for Codex. Let Codex write"),
         "{o}"
     );
     for name in ["tincan", "tincan-consult", "tincan-delegate"] {
@@ -2161,6 +2166,7 @@ fn install_skills_installs_for_the_agents_on_this_machine() {
         o["summary"], "Installed the tincan skills for Claude Code and Codex.",
         "{o}"
     );
+    assert!(o["codex_sandbox"].is_null(), "already granted: {o}");
     assert!(skill(".claude/skills", "tincan").is_file());
     // with the Claude Code plugin installed, its own copy is used instead
     std::fs::remove_dir_all(d.0.join(".claude/skills")).unwrap();
@@ -2173,6 +2179,51 @@ fn install_skills_installs_for_the_agents_on_this_machine() {
         "{o}"
     );
     assert!(!d.0.join(".claude/skills/tincan").exists());
+}
+
+#[test]
+fn install_skills_grants_codex_write_access_to_teams() {
+    let d = TmpDir::new();
+    let home = d.0.to_string_lossy().into_owned();
+    let env = [
+        ("HOME", home.as_str()),
+        ("USERPROFILE", home.as_str()),
+        ("LOCALAPPDATA", ""),
+    ];
+    let config = d.0.join(".codex/config.toml");
+    std::fs::create_dir_all(d.0.join(".codex")).unwrap();
+    let existing =
+        "model = \"gpt\" # mine\n\n[sandbox_workspace_write]\nwritable_roots = [\"/opt/x\"]\n";
+    std::fs::write(&config, existing).unwrap();
+    let opts = Opts {
+        env: &env,
+        ..Opts::default()
+    };
+    let (rc, o) = exec(None, &["install-skills"], opts);
+    assert_eq!(rc, 0, "{o}");
+    let data =
+        d.0.join(".local/share/tincan")
+            .to_string_lossy()
+            .into_owned();
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.contains("model = \"gpt\" # mine"), "{text}");
+    assert!(text.contains("\"/opt/x\""), "{text}");
+    assert!(text.contains(&format!("\"{data}\"")), "{text}");
+    // idempotent
+    exec(None, &["install-skills"], opts);
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
+    // opt-out leaves a fresh config alone
+    std::fs::write(&config, "").unwrap();
+    let env_off = [env[0], env[1], env[2], ("TINCAN_NO_MODIFY_CODEX", "1")];
+    exec(
+        None,
+        &["install-skills"],
+        Opts {
+            env: &env_off,
+            ..Opts::default()
+        },
+    );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "");
 }
 
 #[test]

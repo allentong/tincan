@@ -184,7 +184,7 @@ fn default_team() -> Option<PathBuf> {
 }
 
 /// `~/.local/share/tincan` (Windows: `%LOCALAPPDATA%\tincan`).
-fn data_dir() -> Option<PathBuf> {
+pub fn data_dir() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty()) {
         return Some(Path::new(&d).join("tincan"));
     }

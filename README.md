@@ -32,6 +32,7 @@ Then open a new terminal.
 
 - `TINCAN_INSTALL_DIR`: install somewhere other than `~/.local/bin` (Windows: `%LOCALAPPDATA%\tincan\bin`).
 - `TINCAN_NO_MODIFY_PATH=1`: don't add tincan to your PATH.
+- `TINCAN_NO_MODIFY_CODEX=1`: don't add tincan's data dir to Codex's sandbox `writable_roots` (see below).
 - From source: `cargo install --git https://github.com/allentong/tincan && tincan install-skills`.
 - Releases carry GitHub build-provenance attestations; the installers verify them when `gh` is signed in. Manually: `gh attestation verify <archive> --repo allentong/tincan --signer-workflow allentong/tincan/.github/workflows/release.yml`.
 
@@ -143,7 +144,7 @@ Every command prints one JSON line and uses stable exit codes, so agents can par
 
 ## Teach your agents
 
-The installer runs `tincan install-skills`, which installs the skills for each agent it finds on your machine: `~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex and Grok. Installed an agent later? Run `tincan install-skills` again. With the Claude Code plugin installed, Claude uses the plugin's copy instead.
+The installer runs `tincan install-skills`, which installs the skills for each agent it finds on your machine: `~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex and Grok. Installed an agent later? Run `tincan install-skills` again. For Codex it also adds `~/.local/share/tincan` to `sandbox_workspace_write.writable_roots` in `~/.codex/config.toml`, since Codex's sandbox otherwise only writes inside the project and teams live in your home directory. With the Claude Code plugin installed, Claude uses the plugin's copy instead.
 
 **Recipes.** Two more skills ship with it (in Claude Code with the plugin, `/tincan:consult` and `/tincan:delegate`; elsewhere `tincan-consult` and `tincan-delegate`):
 
