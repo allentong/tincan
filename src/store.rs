@@ -130,28 +130,6 @@ fn find_upwards(start: &Path) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-/// The repo a workspace belongs to: a worktree's main checkout, or the workspace itself.
-pub fn repo_of(workspace: &Path) -> PathBuf {
-    let repo = main_checkout(workspace).unwrap_or_else(|| workspace.to_path_buf());
-    std::fs::canonicalize(&repo).unwrap_or(repo)
-}
-
-fn main_checkout(workspace: &Path) -> Option<PathBuf> {
-    // A worktree's `.git` is a file holding `gitdir: <main>/.git/worktrees/<name>`.
-    let text = std::fs::read_to_string(workspace.join(".git")).ok()?;
-    let gitdir = Path::new(text.trim().strip_prefix("gitdir:")?.trim());
-    workspace
-        .join(gitdir)
-        .ancestors()
-        .find(|a| a.file_name().is_some_and(|n| n == ".git"))
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-}
-
-pub fn is_default_team(dir: &Path) -> bool {
-    default_team().is_some_and(|d| d == dir)
-}
-
 /// The per-user team: `~/.local/share/tincan/default` (Windows: `%LOCALAPPDATA%\tincan\default`).
 fn default_team() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty()) {
