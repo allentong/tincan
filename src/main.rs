@@ -21,7 +21,7 @@ use error::{Code, TincanError};
     about = "Message other agent sessions on the same team floor"
 )]
 pub struct Cli {
-    /// Team directory (else TINCAN_TEAM_DIR, else nearest ancestor with .tincan/)
+    /// Team directory (else TINCAN_TEAM_DIR, else nearest ancestor with .tincan/, else the repo's team in ~/.local/share/tincan)
     #[arg(long, global = true)]
     pub team_dir: Option<String>,
     /// Act as this role (else TINCAN_ROLE, else inferred from the harness session)
@@ -33,7 +33,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Create .tincan/ in the team dir
+    /// Create a separate team for the current directory and below
     Init,
     /// Claim a role for this session
     Register {

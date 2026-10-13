@@ -1592,11 +1592,28 @@ fn default_team_dir(dir: &Path) -> PathBuf {
     dir.join("home/appdata/tincan/default/.tincan")
 }
 
+/// The team a repo gets in the test's data dir: `repos/<name>-<hash>/.tincan`.
+fn repo_team_dir(dir: &Path, name: &str) -> PathBuf {
+    let repos = dir.join("home/appdata/tincan/repos");
+    let entry = std::fs::read_dir(&repos)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            let file = p.file_name().unwrap().to_string_lossy();
+            file.strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|hash| hash.len() == 16)
+        })
+        .unwrap_or_else(|| panic!("no team for {name} in {}", repos.display()));
+    entry.join(".tincan")
+}
+
 #[test]
-fn team_defaults_to_per_user_team_inside_a_repo() {
+fn repo_team_lives_in_the_data_dir_not_the_checkout() {
     let d = TmpDir::new();
-    std::fs::create_dir_all(d.0.join(".git")).unwrap();
-    let sub = d.0.join("src/deep");
+    let repo = d.0.join("repo");
+    let sub = repo.join("src/deep");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
     std::fs::create_dir_all(&sub).unwrap();
     let home = home_vars(&d.0);
     let opts = Opts {
@@ -1606,9 +1623,8 @@ fn team_defaults_to_per_user_team_inside_a_repo() {
     };
     let (rc, o) = exec(None, &["peers"], opts);
     assert_eq!(rc, 0, "{o}");
-    assert!(default_team_dir(&d.0).join(".gitignore").is_file(), "{o}");
-    assert!(!d.0.join(".tincan").exists());
-    assert!(!sub.join(".tincan").exists());
+    assert!(repo_team_dir(&d.0, "repo").is_dir(), "{o}");
+    assert!(!repo.join(".tincan").exists() && !sub.join(".tincan").exists());
     assert!(o["setup"].as_str().unwrap().contains("Created team"), "{o}");
     // second call: nothing new to confirm
     let (_, o) = exec(None, &["peers"], opts);
@@ -1616,7 +1632,45 @@ fn team_defaults_to_per_user_team_inside_a_repo() {
 }
 
 #[test]
-fn sessions_in_different_repos_share_the_per_user_team() {
+fn worktrees_share_the_main_checkout_team() {
+    let d = TmpDir::new();
+    let main = d.0.join("repo");
+    std::fs::create_dir_all(main.join(".git/worktrees/feat")).unwrap();
+    let wt = d.0.join("repo-feat");
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(
+        wt.join(".git"),
+        format!("gitdir: {}\n", main.join(".git/worktrees/feat").display()),
+    )
+    .unwrap();
+    let home = home_vars(&d.0);
+    let env = vars(&home);
+    let at = |cwd: &Path, args: &[&str]| {
+        exec(
+            None,
+            args,
+            Opts {
+                env: &env,
+                cwd: Some(cwd),
+                ..Opts::default()
+            },
+        )
+    };
+    assert_eq!(at(&main, &["register", "alpha", "--pid", "0"]).0, 0);
+    let (rc, o) = at(&wt, &["peers"]);
+    assert_eq!(rc, 0, "{o}");
+    assert!(o.to_string().contains("\"alpha\""), "{o}");
+    assert!(!main.join(".tincan").exists() && !wt.join(".tincan").exists());
+    assert_eq!(
+        std::fs::read_dir(d.0.join("home/appdata/tincan/repos"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn different_repos_get_separate_teams() {
     let d = TmpDir::new();
     let (a, b) = (d.0.join("repo-a"), d.0.join("repo-b"));
     for repo in [&a, &b] {
@@ -1624,28 +1678,22 @@ fn sessions_in_different_repos_share_the_per_user_team() {
     }
     let home = home_vars(&d.0);
     let env = vars(&home);
-    let (rc, o) = exec(
-        None,
-        &["register", "alpha", "--pid", "0"],
-        Opts {
-            env: &env,
-            cwd: Some(&a),
-            ..Opts::default()
-        },
-    );
+    let at = |cwd: &Path, args: &[&str]| {
+        exec(
+            None,
+            args,
+            Opts {
+                env: &env,
+                cwd: Some(cwd),
+                ..Opts::default()
+            },
+        )
+    };
+    assert_eq!(at(&a, &["register", "alpha", "--pid", "0"]).0, 0);
+    let (rc, o) = at(&b, &["peers"]);
     assert_eq!(rc, 0, "{o}");
-    let (rc, o) = exec(
-        None,
-        &["peers"],
-        Opts {
-            env: &env,
-            cwd: Some(&b),
-            ..Opts::default()
-        },
-    );
-    assert_eq!(rc, 0, "{o}");
-    assert!(o.to_string().contains("\"alpha\""), "{o}");
-    assert!(!a.join(".tincan").exists() && !b.join(".tincan").exists());
+    assert!(!o.to_string().contains("\"alpha\""), "{o}");
+    assert_ne!(repo_team_dir(&d.0, "repo-a"), repo_team_dir(&d.0, "repo-b"));
 }
 
 #[test]
@@ -2044,7 +2092,7 @@ fn bad_roles_and_durations_rejected() {
 }
 
 #[test]
-fn install_skills_puts_the_skill_where_harnesses_look() {
+fn install_skills_installs_for_the_agents_on_this_machine() {
     let d = TmpDir::new();
     let home = d.0.to_string_lossy().into_owned();
     let env = [("HOME", home.as_str()), ("USERPROFILE", home.as_str())];
@@ -2052,24 +2100,45 @@ fn install_skills_puts_the_skill_where_harnesses_look() {
         env: &env,
         ..Opts::default()
     };
+    let skill = |root: &str, name: &str| d.0.join(root).join(name).join("SKILL.md");
+    // no agents: nothing written
     let (rc, o) = exec(None, &["install-skills"], opts);
     assert_eq!(rc, 0, "{o}");
-    for root in [".agents/skills", ".claude/skills"] {
-        for name in ["tincan", "tincan-consult", "tincan-delegate"] {
-            let p = d.0.join(root).join(name).join("SKILL.md");
-            let text = std::fs::read_to_string(&p).unwrap();
-            assert!(
-                text.starts_with(&format!("---\nname: {name}\n")),
-                "{}",
-                p.display()
-            );
-        }
+    assert!(
+        o["summary"].as_str().unwrap().starts_with("No Claude Code"),
+        "{o}"
+    );
+    assert!(!d.0.join(".claude").exists() && !d.0.join(".agents").exists());
+    // Codex only: the shared agents dir, not Claude's
+    std::fs::create_dir_all(d.0.join(".codex")).unwrap();
+    let (_, o) = exec(None, &["install-skills"], opts);
+    assert_eq!(
+        o["summary"], "Installed the tincan skills for Codex.",
+        "{o}"
+    );
+    for name in ["tincan", "tincan-consult", "tincan-delegate"] {
+        let text = std::fs::read_to_string(skill(".agents/skills", name)).unwrap();
+        assert!(text.starts_with(&format!("---\nname: {name}\n")), "{name}");
     }
+    assert!(!d.0.join(".claude/skills").exists());
+    // Claude Code too
+    std::fs::create_dir_all(d.0.join(".claude")).unwrap();
+    let (_, o) = exec(None, &["install-skills"], opts);
+    assert_eq!(
+        o["summary"], "Installed the tincan skills for Claude Code and Codex.",
+        "{o}"
+    );
+    assert!(skill(".claude/skills", "tincan").is_file());
     // with the Claude Code plugin installed, its own copy is used instead
     std::fs::remove_dir_all(d.0.join(".claude/skills")).unwrap();
     std::fs::create_dir_all(d.0.join(".claude/plugins/cache/tincan")).unwrap();
     let (_, o) = exec(None, &["install-skills"], opts);
-    assert_eq!(o["skipped"][0]["for"], "claude", "{o}");
+    assert!(
+        o["skipped"]
+            .to_string()
+            .contains("the tincan plugin is installed"),
+        "{o}"
+    );
     assert!(!d.0.join(".claude/skills/tincan").exists());
 }
 
@@ -2229,7 +2298,7 @@ fn launched_harness_uses_worktree_instead_of_main_checkout() {
     assert_eq!(strs(&waited["replied"]), ["fake-worktree-2"], "{waited}");
     let (_, inbox) = exec(None, &["--as", "lead", "inbox"], opts);
     assert_eq!(bodies(&inbox), [expected.to_string_lossy().as_ref()]);
-    assert!(default_team_dir(&d.0).is_dir());
+    assert!(repo_team_dir(&d.0, "repo").is_dir());
     assert!(!main.join(".tincan").exists() && !worktree.join(".tincan").exists());
 }
 

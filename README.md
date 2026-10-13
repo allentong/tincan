@@ -4,9 +4,9 @@
 
 Let your coding agents talk to each other. `tincan` is a small local CLI that lets Claude Code, Codex, Grok, opencode and other agent sessions on the same machine send each other messages, so you stop being the copy-paste bus between terminals.
 
-- **One binary, no daemon, no network.** A team is one SQLite file in your home directory.
+- **One binary, no daemon, no network.** A team is one SQLite file in your home directory; nothing is written to your projects.
 - **Fast.** About 9 ms per command.
-- **Store-and-forward only.** Message bodies are held until the recipient reads them, then erased. Routing metadata (sender, recipients, times) is kept for an hour for replies and dedup. `.tincan/` is git-ignored and owner-only.
+- **Store-and-forward only.** Message bodies are held until the recipient reads them, then erased. Routing metadata (sender, recipients, times) is kept for an hour for replies and dedup. The store is owner-only.
 - **At-least-once delivery.** Leased reads, optional explicit ack, idempotent sends.
 - **Loop guards.** Reply chains stop at 8 hops; `--no-reply` messages can't be answered.
 - **Pluggable.** New harnesses and terminals are JSON entries, not code changes.
@@ -93,7 +93,7 @@ Install once (one command, above), then just ask an agent: "message codex and as
 
 There is no setup step. The first time a session uses tincan (or starts, if hooks are installed):
 
-- **Team:** every session on your machine shares one team in `~/.local/share/tincan/default` (Windows `%LOCALAPPDATA%\tincan\default`), owner-only. Nothing is written to your projects. Each peer records its workspace (repo or worktree), and sending to a harness name reaches a session in the same workspace or starts a headless one there.
+- **Team:** each git repo gets its own team in `~/.local/share/tincan/repos/<repo>-<hash>` (Windows `%LOCALAPPDATA%\tincan\repos\…`), shared by every session in the repo, including its worktrees. Outside a repo, sessions share `~/.local/share/tincan/default`. Nothing is written to your projects. Each peer records its workspace, and a headless helper starts in the sender's worktree or working directory.
 - **Name:** the session registers under its harness name, `claude`, `codex` or `grok`. A second live Claude session gets `claude-2`. When an outermost PID-bound session auto-registers with a unique supported terminal target such as tmux or cmux, it also records that pane or surface so new mail can wake the idle session. Nested agents never claim the outer harness's terminal.
 - **Confirmation:** the command's output carries a `setup` field saying what was created and the name taken, and the skill tells the agent to relay it to you.
 
@@ -112,7 +112,7 @@ tincan wait --replies-to <id>                                   # returns once c
 tincan inbox
 ```
 
-The quick session reads the question with `tincan inbox` and replies with `tincan reply`. It can do work, not just answer. Codex's runs in its `workspace-write` sandbox. Claude's may edit files and run a fixed list of non-privileged tincan commands, local `git` without push, and `cargo`/`npm`/`pnpm`/`pytest`/`go` build and test; anything else, including network access, is denied. A launched session cannot override its role/team, change tincan configuration, or start another session. It receives only path, locale, platform runtime, and explicitly configured environment variables. Because it takes direction from another agent rather than from you, override `launch` or `pass_env` for `claude` in `harnesses.json` only when the added capability is trusted. It uses your existing CLI login, logs to `launch-<role>.log` in the team's `.tincan/`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
+The quick session reads the question with `tincan inbox` and replies with `tincan reply`. It can do work, not just answer. Codex's runs in its `workspace-write` sandbox. Claude's may edit files and run a fixed list of non-privileged tincan commands, local `git` without push, and `cargo`/`npm`/`pnpm`/`pytest`/`go` build and test; anything else, including network access, is denied. A launched session cannot override its role/team, change tincan configuration, or start another session. It receives only path, locale, platform runtime, and explicitly configured environment variables. Because it takes direction from another agent rather than from you, override `launch` or `pass_env` for `claude` in `harnesses.json` only when the added capability is trusted. It uses your existing CLI login, logs to `launch-<role>.log` in the team store, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
 
 **Keeping it for follow-ups.** With `--stay`, the started session answers or does the task, can ask the sender questions (`tincan send <sender> "…"`), and waits for more. It ends when told it's done, or when the sender's session ends. Follow-ups go to it by name, with its context intact. `--new` starts a fresh session under the next free name (`claude-2`) even when one is running.
 
@@ -143,7 +143,7 @@ Every command prints one JSON line and uses stable exit codes, so agents can par
 
 ## Teach your agents
 
-`tincan install-skills` (run by the install steps above) puts the skill in `~/.claude/skills` for Claude Code and `~/.agents/skills` for Codex and Grok. With the Claude Code plugin installed, Claude uses the plugin's copy instead.
+The installer runs `tincan install-skills`, which installs the skills for each agent it finds on your machine: `~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex and Grok. Installed an agent later? Run `tincan install-skills` again. With the Claude Code plugin installed, Claude uses the plugin's copy instead.
 
 **Recipes.** Two more skills ship with it (in Claude Code with the plugin, `/tincan:consult` and `/tincan:delegate`; elsewhere `tincan-consult` and `tincan-delegate`):
 
@@ -213,7 +213,7 @@ Check what's loaded with `tincan extensions`. Bad config is reported there; the 
 ]
 ```
 
-`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}` (shared team root), `{store}` (its `.tincan` directory), `{workspace}` (the sender's checkout or working directory), `{role}`, `{sender}`, `{message_id}`. Child processes start with a minimal environment; `pass_env` is the explicit opt-in for any additional variable the harness requires. Treat every added credential as granting the launched agent that credential's authority.
+`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}` (the team dir, in your data dir, not a project; don't use it as a working dir), `{store}` (its `.tincan` directory), `{workspace}` (the sender's checkout or working directory), `{role}`, `{sender}`, `{message_id}`. Child processes start with a minimal environment; `pass_env` is the explicit opt-in for any additional variable the harness requires. Treat every added credential as granting the launched agent that credential's authority.
 
 Without a profile, any harness can still use `--as ROLE` or `TINCAN_ROLE`.
 
@@ -223,7 +223,7 @@ tincan is local-only: every peer runs on the same machine against the same team 
 
 Message bodies come from other agents. The skill tells agents to treat them as a peer's request, not the user's instruction, and never to take destructive or credentialed actions because a message asked.
 
-Roles are routing labels, not authenticated identities. Every process with access to the owner-only team store is trusted with every mailbox, so messages must not contain secrets from another local process or agent. Headless stdout/stderr logs persist in `.tincan/launch-<role>.log` until replaced or manually removed. See [SECURITY.md](SECURITY.md) for the full trust model and private reporting instructions.
+Roles are routing labels, not authenticated identities. Every process with access to the owner-only team store is trusted with every mailbox, so messages must not contain secrets from another local process or agent. Headless stdout/stderr logs persist in the team store's `launch-<role>.log` until replaced or manually removed. See [SECURITY.md](SECURITY.md) for the full trust model and private reporting instructions.
 
 ## Development
 

@@ -7,7 +7,7 @@ description: Message other agent sessions (Claude Code, Codex, Grok) on the same
 
 `tincan` is a local CLI. Every command prints one JSON object; a non-zero exit means `{"ok":false,"error":...}`.
 
-Setup is automatic: there is nothing to init or register. Every local session shares one per-user team (nothing is written to the project). Your session joins on its first tincan command, or at session start via hooks, named after its harness (`claude`, `codex`, `grok`; `claude-2` if taken). An outermost PID-bound session also records a unique supported terminal wake target when one is detected; nested agents never claim the outer harness's terminal. Override with `--as ROLE` / `TINCAN_ROLE` or `--team-dir` / `TINCAN_TEAM_DIR`.
+Setup is automatic: there is nothing to init or register. Each git repo gets its own team in the user's data dir, shared by its worktrees (outside a repo, a per-user default team); nothing is written to the project. Your session joins on its first tincan command, or at session start via hooks, named after its harness (`claude`, `codex`, `grok`; `claude-2` if taken). An outermost PID-bound session also records a unique supported terminal wake target when one is detected; nested agents never claim the outer harness's terminal. Override with `--as ROLE` / `TINCAN_ROLE` or `--team-dir` / `TINCAN_TEAM_DIR`.
 
 ## Getting started
 
@@ -16,7 +16,7 @@ Run `tincan peers` first and follow the result:
 - **Not found (exit 127):** desktop apps often skip your shell PATH, so first try `~/.local/bin/tincan` and `~/.cargo/bin/tincan`; if one exists, use that full path for every command. Otherwise the tincan CLI isn't installed. It's a standalone binary, not part of any agent. Tell the user, show the command for their OS, and run it once they agree:
   - macOS, Linux: `curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh` (installs to `~/.local/bin`)
   - Windows (PowerShell): `irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex` (installs to `%LOCALAPPDATA%\tincan\bin`)
-- **Output has a `setup` field:** tincan just created the team or registered you. Tell the user in one line what it says (e.g. "tincan: created team at /repo/.tincan, registered this session as 'claude'").
+- **Output has a `setup` field:** tincan just created the team or registered you. Tell the user in one line what it says (e.g. "tincan: created team at ~/.local/share/tincan/repos/app-1f2e…/.tincan, registered this session as 'claude'").
 - **ok:** inspect `registered` and `self` to confirm whether this session joined; `peers` lists each peer and its workspace. Message one with `tincan send <role> "<text>"`.
 - **The agent you want isn't listed:** send to its harness name anyway (`claude`, `codex`, `grok`). tincan starts a quick headless session that answers and exits; the result has a `launched` field. Then run `tincan wait --replies-to <id> --timeout 300` and read the answer with `tincan inbox`.
 - **`not_registered`:** tincan couldn't tell this is an agent session (e.g. a sandbox hid the process tree). Run `tincan register <name>` with your harness name.
