@@ -8,7 +8,7 @@ dir="${TINCAN_INSTALL_DIR:-$HOME/.local/bin}"
 case "$(uname -s)" in
   Darwin) os=apple-darwin ;;
   Linux) os=unknown-linux-musl ;;
-  *) echo "tincan: unsupported OS $(uname -s); build with cargo install --git https://github.com/$repo" >&2; exit 1 ;;
+  *) echo "tincan: unsupported OS $(uname -s); build from source: cargo install --git https://github.com/$repo" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
   arm64|aarch64) arch=aarch64 ;;
@@ -38,4 +38,30 @@ install -m 755 "$tmp/tincan" "$dir/tincan"
 echo "Installed $("$dir/tincan" --version) to $dir/tincan"
 # The skill ships in the binary: put it where Claude Code, Codex and Grok look for skills.
 "$dir/tincan" install-skills >/dev/null && echo "Installed the tincan skill for Claude Code, Codex and Grok"
-case ":$PATH:" in *":$dir:"*) ;; *) echo "Add $dir to your PATH." ;; esac
+case ":$PATH:" in
+  *":$dir:"*) ;;
+  *)
+    # Put $dir on PATH for new shells, like rustup and bun do. TINCAN_NO_MODIFY_PATH=1 opts out.
+    if [ -n "${TINCAN_NO_MODIFY_PATH:-}" ]; then
+      echo "Add $dir to your PATH."
+      exit 0
+    fi
+    line="export PATH=\"$dir:\$PATH\""
+    case "$(basename "${SHELL:-sh}")" in
+      zsh) rcs="${ZDOTDIR:-$HOME}/.zshrc" ;;
+      bash) if [ "$os" = apple-darwin ]; then rcs="$HOME/.bash_profile"; else rcs="$HOME/.bashrc"; fi ;;
+      fish) rcs="" line="fish_add_path $dir"
+        mkdir -p "$HOME/.config/fish/conf.d"
+        echo "$line" > "$HOME/.config/fish/conf.d/tincan.fish"
+        echo "Added $dir to PATH in ~/.config/fish/conf.d/tincan.fish" ;;
+      *) rcs="$HOME/.profile" ;;
+    esac
+    for rc in $rcs; do
+      if ! grep -qsF "$line" "$rc"; then
+        printf '\n# tincan\n%s\n' "$line" >> "$rc"
+        echo "Added $dir to PATH in $rc"
+      fi
+    done
+    echo "Open a new terminal (or run: $line) to use tincan."
+    ;;
+esac

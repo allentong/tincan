@@ -13,17 +13,6 @@ Let your coding agents talk to each other. `tincan` is a small local CLI that le
 
 ## Install
 
-There's no release yet, so install from source (needs [Rust](https://rustup.rs)):
-
-```sh
-cargo install --git https://github.com/allentong/tincan
-tincan install-skills
-```
-
-That puts `tincan` in `~/.cargo/bin` and the skill in place for Claude Code, Codex and Grok. That is the only setup. Desktop apps don't always load your shell PATH, so the plugin hooks and the skill also look in `~/.local/bin` and `~/.cargo/bin`.
-
-Once a release is published, these scripts will install the prebuilt binary and the skill instead:
-
 ```sh
 # macOS, Linux
 curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh
@@ -31,9 +20,13 @@ curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | 
 irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex
 ```
 
+No Rust or other dependencies needed. The script downloads the prebuilt binary for your platform into `~/.local/bin` (Windows: `%LOCALAPPDATA%\tincan\bin`), installs the skill for Claude Code, Codex and Grok, and adds that directory to your PATH (your shell's rc file; on Windows, your user PATH). Open a new terminal afterwards. Set `TINCAN_INSTALL_DIR` to install elsewhere, or `TINCAN_NO_MODIFY_PATH=1` to leave your PATH alone. Desktop apps don't always load your shell PATH, so the plugin hooks and the skill also look in `~/.local/bin` and `~/.cargo/bin`.
+
+To build from source instead (needs [Rust](https://rustup.rs)): `cargo install --git https://github.com/allentong/tincan && tincan install-skills`.
+
 Release artifacts carry GitHub build-provenance attestations. When an authenticated GitHub CLI is available, the installers verify that provenance automatically; otherwise they print that only the same-release checksum was verified. You can verify a downloaded archive manually with `gh attestation verify <archive> --repo allentong/tincan --signer-workflow allentong/tincan/.github/workflows/release.yml`.
 
-**Update:** `tincan self-update` installs the latest release over the running binary and refreshes the skill (`--check` only reports). Like the installers, it verifies the release checksum, and build provenance when `gh` is authenticated. Before the first release, rerun `cargo install --git https://github.com/allentong/tincan --force`, then `tincan install-skills`.
+**Update:** `tincan self-update` installs the latest release over the running binary and refreshes the skill (`--check` only reports). Like the installers, it verifies the release checksum, and build provenance when `gh` is authenticated.
 
 Agent sessions check for a release once a day, in the background from the SessionStart hook. Pick what happens in `~/.config/tincan/config.json` (or `$TINCAN_UPDATES`):
 
@@ -151,12 +144,11 @@ Every command prints one JSON line and uses stable exit codes, so agents can par
 /plugin install tincan@tincan
 ```
 
-To update it, reinstall: `/plugin update` keeps the cached copy while the version number is unchanged.
+The plugin's version follows tincan releases. Turn on auto-update for the tincan marketplace in `/plugin`, or update by hand:
 
 ```
 /plugin marketplace update tincan
-/plugin uninstall tincan@tincan
-/plugin install tincan@tincan
+/plugin update tincan@tincan
 ```
 
 ## Getting woken up

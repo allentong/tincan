@@ -44,8 +44,13 @@ try {
   if ($LASTEXITCODE -eq 0) { Write-Host "Installed the tincan skill for Claude Code, Codex and Grok" }
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
   if (-not (($env:Path + ';' + $userPath).Split(';') -contains $dir)) {
-    Write-Host "Add $dir to your PATH:"
-    Write-Host "  [Environment]::SetEnvironmentVariable('Path', `"$dir;`" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')"
+    if ($env:TINCAN_NO_MODIFY_PATH) {
+      Write-Host "Add $dir to your PATH."
+    } else {
+      [Environment]::SetEnvironmentVariable('Path', (@($dir) + @($userPath -split ';' | Where-Object { $_ })) -join ';', 'User')
+      $env:Path = "$dir;$env:Path"
+      Write-Host "Added $dir to your user PATH. Open a new terminal to use tincan."
+    }
   }
 } finally {
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
