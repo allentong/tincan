@@ -13,20 +13,33 @@ Let your coding agents talk to each other. `tincan` is a small local CLI that le
 
 ## Install
 
+**macOS / Linux**
+
 ```sh
-# macOS, Linux
 curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh
-# Windows (PowerShell)
+```
+
+**Windows** (PowerShell)
+
+```powershell
 irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex
 ```
 
-No Rust or other dependencies needed. The script downloads the prebuilt binary for your platform into `~/.local/bin` (Windows: `%LOCALAPPDATA%\tincan\bin`), installs the skill for Claude Code, Codex and Grok, and adds that directory to your PATH (your shell's rc file; on Windows, your user PATH). Open a new terminal afterwards. Set `TINCAN_INSTALL_DIR` to install elsewhere, or `TINCAN_NO_MODIFY_PATH=1` to leave your PATH alone. Desktop apps don't always load your shell PATH, so the plugin hooks and the skill also look in `~/.local/bin` and `~/.cargo/bin`.
+Then open a new terminal.
 
-To build from source instead (needs [Rust](https://rustup.rs)): `cargo install --git https://github.com/allentong/tincan && tincan install-skills`.
+<details>
+<summary>Install options</summary>
 
-Release artifacts carry GitHub build-provenance attestations. When an authenticated GitHub CLI is available, the installers verify that provenance automatically; otherwise they print that only the same-release checksum was verified. You can verify a downloaded archive manually with `gh attestation verify <archive> --repo allentong/tincan --signer-workflow allentong/tincan/.github/workflows/release.yml`.
+- `TINCAN_INSTALL_DIR`: install somewhere other than `~/.local/bin` (Windows: `%LOCALAPPDATA%\tincan\bin`).
+- `TINCAN_NO_MODIFY_PATH=1`: don't add tincan to your PATH.
+- From source: `cargo install --git https://github.com/allentong/tincan && tincan install-skills`.
+- Releases carry GitHub build-provenance attestations; the installers verify them when `gh` is signed in. Manually: `gh attestation verify <archive> --repo allentong/tincan --signer-workflow allentong/tincan/.github/workflows/release.yml`.
 
-**Update:** `tincan self-update` installs the latest release over the running binary and refreshes the skill (`--check` only reports). Like the installers, it verifies the release checksum, and build provenance when `gh` is authenticated.
+</details>
+
+## Update
+
+`tincan self-update` installs the latest release (`--check` only reports).
 
 Agent sessions check for a release once a day, in the background from the SessionStart hook. Pick what happens in `~/.config/tincan/config.json` (or `$TINCAN_UPDATES`):
 
