@@ -1649,6 +1649,55 @@ fn sessions_in_different_repos_share_the_per_user_team() {
 }
 
 #[test]
+fn per_user_team_broadcast_stays_within_the_senders_repo() {
+    let d = TmpDir::new();
+    let main = d.0.join("repo-a");
+    std::fs::create_dir_all(main.join(".git/worktrees/feat")).unwrap();
+    let worktree = d.0.join("repo-a-feat");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", main.join(".git/worktrees/feat").display()),
+    )
+    .unwrap();
+    let other = d.0.join("repo-b");
+    std::fs::create_dir_all(other.join(".git")).unwrap();
+    let home = home_vars(&d.0);
+    let env = vars(&home);
+    let mut owners = Vec::new();
+    for (role, cwd) in [("lead", &main), ("helper", &worktree), ("outsider", &other)] {
+        let owner = sleeper().spawn().unwrap();
+        let pid = owner.id().to_string();
+        owners.push(owner);
+        let (rc, o) = exec(
+            None,
+            &["register", role, "--pid", &pid],
+            Opts {
+                env: &env,
+                cwd: Some(cwd),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(rc, 0, "{o}");
+    }
+    let (rc, o) = exec(
+        None,
+        &["--as", "lead", "send", "*", "all hands"],
+        Opts {
+            env: &env,
+            cwd: Some(&main),
+            ..Opts::default()
+        },
+    );
+    for mut owner in owners {
+        let _ = owner.kill();
+        let _ = owner.wait();
+    }
+    assert_eq!(rc, 0, "{o}");
+    assert_eq!(strs(&o["recipients"]), ["helper"], "{o}");
+}
+
+#[test]
 fn an_initialized_project_team_still_wins() {
     let d = TmpDir::new();
     let project = d.0.join("project");

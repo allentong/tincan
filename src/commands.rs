@@ -2,7 +2,9 @@ use crate::error::{Code, Result, TincanError};
 use crate::identity::{
     self, LazyCaller, PEER_COLS, Peer, PeerState, me, peer_from_row, touch, whoami,
 };
-use crate::store::{connect, create_private_file, now, resolve_team, resolve_workspace};
+use crate::store::{
+    connect, create_private_file, is_default_team, now, repo_of, resolve_team, resolve_workspace,
+};
 use crate::{Cli, Cmd, harness, hooks, update, wake};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use serde_json::{Value, json};
@@ -565,9 +567,15 @@ fn send(
         .collect::<rusqlite::Result<_>>()?;
     let (kind, recipients): (&str, Vec<String>) = if o.to == "*" {
         // Broadcast fans out at send time to active peers only, so late joiners never see old broadcasts.
+        // The per-user team spans every project, so there a broadcast stays within the sender's repo.
+        let repo = is_default_team(&o.team).then(|| repo_of(&o.workspace));
         let r: Vec<String> = all_peers
             .iter()
             .filter(|p| p.role != me.role && p.state() == PeerState::Active)
+            .filter(|p| {
+                repo.as_ref()
+                    .is_none_or(|r| repo_of(Path::new(&p.workspace)) == *r)
+            })
             .map(|p| p.role.clone())
             .collect();
         if r.is_empty() {
