@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 
 $repo = 'allentong/tincan'
-$dir = if ($env:TINCAN_INSTALL_DIR) { $env:TINCAN_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'tincan\bin' }
+$dir = [IO.Path]::GetFullPath($(if ($env:TINCAN_INSTALL_DIR) { $env:TINCAN_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'tincan\bin' }))
 
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
   'AMD64' { 'x86_64' }
@@ -39,13 +39,18 @@ try {
   Copy-Item -Force (Join-Path $tmp 'tincan.exe') (Join-Path $dir 'tincan.exe')
   $version = & (Join-Path $dir 'tincan.exe') --version
   Write-Host "Installed $version to $dir\tincan.exe"
-  # The skill ships in the binary: put it where Claude Code, Codex and Grok look for skills.
-  & (Join-Path $dir 'tincan.exe') install-skills | Out-Null
-  if ($LASTEXITCODE -eq 0) { Write-Host "Installed the tincan skill for Claude Code, Codex and Grok" }
+  # The skills ship in the binary: install them for each agent found on this machine.
+  $skills = & (Join-Path $dir 'tincan.exe') install-skills | ConvertFrom-Json
+  Write-Host $skills.summary
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
   if (-not (($env:Path + ';' + $userPath).Split(';') -contains $dir)) {
-    Write-Host "Add $dir to your PATH:"
-    Write-Host "  [Environment]::SetEnvironmentVariable('Path', `"$dir;`" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')"
+    if ($env:TINCAN_NO_MODIFY_PATH) {
+      Write-Host "Add $dir to your PATH."
+    } else {
+      [Environment]::SetEnvironmentVariable('Path', (@($dir) + @($userPath -split ';' | Where-Object { $_ })) -join ';', 'User')
+      $env:Path = "$dir;$env:Path"
+      Write-Host "Added $dir to your user PATH. Open a new terminal to use tincan."
+    }
   }
 } finally {
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

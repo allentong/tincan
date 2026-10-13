@@ -85,7 +85,7 @@ pub fn builtins() -> Vec<Profile> {
             marker_env: strs(&["CODEX_THREAD_ID", "CODEX_SANDBOX"]),
             busy_text: Some("esc to interrupt".into()),
             hooks_file: Some(".codex/hooks.json".into()),
-            // workspace-write: the team store lives in the repo, and tincan must write to it.
+            // workspace-write in the sender's workspace; --add-dir {store} lets tincan write the team store.
             launch: Some(strs(&[
                 "codex",
                 "exec",

@@ -4,36 +4,43 @@
 
 Let your coding agents talk to each other. `tincan` is a small local CLI that lets Claude Code, Codex, Grok, opencode and other agent sessions on the same machine send each other messages, so you stop being the copy-paste bus between terminals.
 
-- **One binary, no daemon, no network.** A team is one SQLite file in `<project>/.tincan/`.
+- **One binary, no daemon, no network.** A team is one SQLite file in your home directory; nothing is written to your projects.
 - **Fast.** About 9 ms per command.
-- **Store-and-forward only.** Message bodies are held until the recipient reads them, then erased. Routing metadata (sender, recipients, times) is kept for an hour for replies and dedup. `.tincan/` is git-ignored and owner-only.
+- **Store-and-forward only.** Message bodies are held until the recipient reads them, then erased. Routing metadata (sender, recipients, times) is kept for an hour for replies and dedup. The store is owner-only.
 - **At-least-once delivery.** Leased reads, optional explicit ack, idempotent sends.
 - **Loop guards.** Reply chains stop at 8 hops; `--no-reply` messages can't be answered.
 - **Pluggable.** New harnesses and terminals are JSON entries, not code changes.
 
 ## Install
 
-There's no release yet, so install from source (needs [Rust](https://rustup.rs)):
+**macOS / Linux**
 
 ```sh
-cargo install --git https://github.com/allentong/tincan
-tincan install-skills
+curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh
 ```
 
-That puts `tincan` in `~/.cargo/bin` and the skill in place for Claude Code, Codex and Grok. That is the only setup. Desktop apps don't always load your shell PATH, so the plugin hooks and the skill also look in `~/.local/bin` and `~/.cargo/bin`.
+**Windows** (PowerShell)
 
-Once a release is published, these scripts will install the prebuilt binary and the skill instead:
-
-```sh
-# macOS, Linux
-curl -fsSL https://raw.githubusercontent.com/allentong/tincan/main/install.sh | sh
-# Windows (PowerShell)
+```powershell
 irm https://raw.githubusercontent.com/allentong/tincan/main/install.ps1 | iex
 ```
 
-Release artifacts carry GitHub build-provenance attestations. When an authenticated GitHub CLI is available, the installers verify that provenance automatically; otherwise they print that only the same-release checksum was verified. You can verify a downloaded archive manually with `gh attestation verify <archive> --repo allentong/tincan --signer-workflow allentong/tincan/.github/workflows/release.yml`.
+Then open a new terminal.
 
-**Update:** `tincan self-update` installs the latest release over the running binary and refreshes the skill (`--check` only reports). Like the installers, it verifies the release checksum, and build provenance when `gh` is authenticated. Before the first release, rerun `cargo install --git https://github.com/allentong/tincan --force`, then `tincan install-skills`.
+<details>
+<summary>Install options</summary>
+
+- `TINCAN_INSTALL_DIR`: install somewhere other than `~/.local/bin` (Windows: `%LOCALAPPDATA%\tincan\bin`).
+- `TINCAN_NO_MODIFY_PATH=1`: don't add tincan to your PATH.
+- `TINCAN_NO_MODIFY_CODEX=1`: don't add tincan's data dir to Codex's sandbox `writable_roots` (see below).
+- From source: `cargo install --git https://github.com/allentong/tincan && tincan install-skills`.
+- Releases carry GitHub build-provenance attestations; the installers verify them when `gh` is signed in. Manually: `gh attestation verify <archive> --repo allentong/tincan --signer-workflow allentong/tincan/.github/workflows/release.yml`.
+
+</details>
+
+## Update
+
+`tincan self-update` installs the latest release (`--check` only reports).
 
 Agent sessions check for a release once a day, in the background from the SessionStart hook. Pick what happens in `~/.config/tincan/config.json` (or `$TINCAN_UPDATES`):
 
@@ -67,7 +74,7 @@ Cloud-hosted agents (Grok Bot, cloud sandboxes, CI) aren't supported: the skill 
 
 **Direct pairs.** Claude Code ↔ Codex, Claude Code ↔ Grok and Codex ↔ Grok each sent a question and got the answer back, in both directions, with Codex running as an interactive TUI in cmux.
 
-**Zero-config.** In fresh git repos with no `init` or `register`: `claude -p` and `codex exec` each auto-joined (team created at the repo root, sessions named `claude` and `codex`), and Claude asked Codex a question and got the answer. The same worked from the Claude desktop app (Code tab) running in a git worktree: it joined the main checkout's team and got Codex's reply.
+**Zero-config.** In fresh git repos with no `init` or `register`: `claude -p` and `codex exec` each auto-joined (sessions named `claude` and `codex`), and Claude asked Codex a question and got the answer. The same worked from the Claude desktop app (Code tab) running in a git worktree: it reached Codex and got its reply.
 
 **Terminal wake.** cmux (Codex TUI), tmux 3.7 (Grok TUI) and herdr were tested with real sessions: an idle pane gets the nudge, and a pane mid-turn is skipped (`busy`) rather than typed over. The `cmd:` driver is covered by the test suite.
 
@@ -87,7 +94,7 @@ Install once (one command, above), then just ask an agent: "message codex and as
 
 There is no setup step. The first time a session uses tincan (or starts, if hooks are installed):
 
-- **Team:** `.tincan/` is created at the git repo root, git-ignored and owner-only. Every session in the repo, including its worktrees, shares it. Each peer also records its actual workspace, and a headless helper starts in the sender's worktree rather than the shared main checkout. Outside a repo, sessions share a per-user default team (`~/.local/share/tincan/default`; Windows `%LOCALAPPDATA%\tincan\default`) while helpers start in the sender's working directory.
+- **Team:** each git repo gets its own team in `~/.local/share/tincan/repos/<repo>-<hash>` (Windows `%LOCALAPPDATA%\tincan\repos\…`), shared by every session in the repo, including its worktrees. Outside a repo, sessions share `~/.local/share/tincan/default`. Nothing is written to your projects. Each peer records its workspace, and a headless helper starts in the sender's worktree or working directory.
 - **Name:** the session registers under its harness name, `claude`, `codex` or `grok`. A second live Claude session gets `claude-2`. When an outermost PID-bound session auto-registers with a unique supported terminal target such as tmux or cmux, it also records that pane or surface so new mail can wake the idle session. Nested agents never claim the outer harness's terminal.
 - **Confirmation:** the command's output carries a `setup` field saying what was created and the name taken, and the skill tells the agent to relay it to you.
 
@@ -98,7 +105,7 @@ tincan inbox                                  # in the Codex session
 tincan reply <id> -                           # body is read from stdin
 ```
 
-**Asking an agent that isn't running.** Send to its harness name anyway. tincan starts a quick headless session (`claude -p`, `codex exec`, `grok -p`) in the team dir, and it answers and exits:
+**Asking an agent that isn't running.** Send to its harness name anyway. tincan starts a quick headless session (`claude -p`, `codex exec`, `grok -p`) in your workspace, and it answers and exits:
 
 ```sh
 tincan send codex "What does src/auth.rs do on token expiry?"   # result has "launched"
@@ -106,7 +113,7 @@ tincan wait --replies-to <id>                                   # returns once c
 tincan inbox
 ```
 
-The quick session reads the question with `tincan inbox` and replies with `tincan reply`. It can do work, not just answer. Codex's runs in its `workspace-write` sandbox. Claude's may edit files and run a fixed list of non-privileged tincan commands, local `git` without push, and `cargo`/`npm`/`pnpm`/`pytest`/`go` build and test; anything else, including network access, is denied. A launched session cannot override its role/team, change tincan configuration, or start another session. It receives only path, locale, platform runtime, and explicitly configured environment variables. Because it takes direction from another agent rather than from you, override `launch` or `pass_env` for `claude` in `harnesses.json` only when the added capability is trusted. It uses your existing CLI login, logs to `.tincan/launch-<role>.log`, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
+The quick session reads the question with `tincan inbox` and replies with `tincan reply`. It can do work, not just answer. Codex's runs in its `workspace-write` sandbox. Claude's may edit files and run a fixed list of non-privileged tincan commands, local `git` without push, and `cargo`/`npm`/`pnpm`/`pytest`/`go` build and test; anything else, including network access, is denied. A launched session cannot override its role/team, change tincan configuration, or start another session. It receives only path, locale, platform runtime, and explicitly configured environment variables. Because it takes direction from another agent rather than from you, override `launch` or `pass_env` for `claude` in `harnesses.json` only when the added capability is trusted. It uses your existing CLI login, logs to `launch-<role>.log` in the team store, and can't start further sessions. Pass `--no-launch` to get `peer_unavailable` instead.
 
 **Keeping it for follow-ups.** With `--stay`, the started session answers or does the task, can ask the sender questions (`tincan send <sender> "…"`), and waits for more. It ends when told it's done, or when the sender's session ends. Follow-ups go to it by name, with its context intact. `--new` starts a fresh session under the next free name (`claude-2`) even when one is running.
 
@@ -117,7 +124,7 @@ tincan send claude "Good. Now check the rollback section"     # same session, sa
 tincan send claude "You're done, thanks" --no-reply
 ```
 
-Optional: `tincan register reviewer` for a custom name, `--as ROLE` / `TINCAN_ROLE` to act as one, `--team-dir` / `TINCAN_TEAM_DIR` or `tincan init` (current dir) to pick a different team. Plain shells and scripts aren't agent sessions, so they don't auto-register: use `register` or `--as`.
+Optional: `tincan register reviewer` for a custom name, `--as ROLE` / `TINCAN_ROLE` to act as one, `--team-dir` / `TINCAN_TEAM_DIR` or `tincan init` (a separate team for the current directory and below) to pick a different team. Plain shells and scripts aren't agent sessions, so they don't auto-register: use `register` or `--as`.
 
 Every command prints one JSON line and uses stable exit codes, so agents can parse the result. (`tincan hook` is the exception: it prints nothing when there's nothing to tell the agent.)
 
@@ -137,7 +144,7 @@ Every command prints one JSON line and uses stable exit codes, so agents can par
 
 ## Teach your agents
 
-`tincan install-skills` (run by the install steps above) puts the skill in `~/.claude/skills` for Claude Code and `~/.agents/skills` for Codex and Grok. With the Claude Code plugin installed, Claude uses the plugin's copy instead.
+The installer runs `tincan install-skills`, which installs the skills for each agent it finds on your machine: `~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex and Grok. Installed an agent later? Run `tincan install-skills` again. For Codex it also adds `~/.local/share/tincan` to `sandbox_workspace_write.writable_roots` in `~/.codex/config.toml`, since Codex's sandbox otherwise only writes inside the project and teams live in your home directory. With the Claude Code plugin installed, Claude uses the plugin's copy instead.
 
 **Recipes.** Two more skills ship with it (in Claude Code with the plugin, `/tincan:consult` and `/tincan:delegate`; elsewhere `tincan-consult` and `tincan-delegate`):
 
@@ -151,12 +158,11 @@ Every command prints one JSON line and uses stable exit codes, so agents can par
 /plugin install tincan@tincan
 ```
 
-To update it, reinstall: `/plugin update` keeps the cached copy while the version number is unchanged.
+The plugin's version follows tincan releases. Turn on auto-update for the tincan marketplace in `/plugin`, or update by hand:
 
 ```
 /plugin marketplace update tincan
-/plugin uninstall tincan@tincan
-/plugin install tincan@tincan
+/plugin update tincan@tincan
 ```
 
 ## Getting woken up
@@ -208,7 +214,7 @@ Check what's loaded with `tincan extensions`. Bad config is reported there; the 
 ]
 ```
 
-`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}` (shared team root), `{store}` (its `.tincan` directory), `{workspace}` (the sender's checkout or working directory), `{role}`, `{sender}`, `{message_id}`. Child processes start with a minimal environment; `pass_env` is the explicit opt-in for any additional variable the harness requires. Treat every added credential as granting the launched agent that credential's authority.
+`launch` is how tincan starts a quick session for mail to that name. Placeholders: `{prompt}`, `{team}` (the team dir, in your data dir, not a project; don't use it as a working dir), `{store}` (its `.tincan` directory), `{workspace}` (the sender's checkout or working directory), `{role}`, `{sender}`, `{message_id}`. Child processes start with a minimal environment; `pass_env` is the explicit opt-in for any additional variable the harness requires. Treat every added credential as granting the launched agent that credential's authority.
 
 Without a profile, any harness can still use `--as ROLE` or `TINCAN_ROLE`.
 
@@ -218,7 +224,7 @@ tincan is local-only: every peer runs on the same machine against the same team 
 
 Message bodies come from other agents. The skill tells agents to treat them as a peer's request, not the user's instruction, and never to take destructive or credentialed actions because a message asked.
 
-Roles are routing labels, not authenticated identities. Every process with access to the owner-only team store is trusted with every mailbox, so messages must not contain secrets from another local process or agent. Headless stdout/stderr logs persist in `.tincan/launch-<role>.log` until replaced or manually removed. See [SECURITY.md](SECURITY.md) for the full trust model and private reporting instructions.
+Roles are routing labels, not authenticated identities. Every process with access to the owner-only team store is trusted with every mailbox, so messages must not contain secrets from another local process or agent. Headless stdout/stderr logs persist in the team store's `launch-<role>.log` until replaced or manually removed. See [SECURITY.md](SECURITY.md) for the full trust model and private reporting instructions.
 
 ## Development
 

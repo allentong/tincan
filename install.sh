@@ -8,7 +8,7 @@ dir="${TINCAN_INSTALL_DIR:-$HOME/.local/bin}"
 case "$(uname -s)" in
   Darwin) os=apple-darwin ;;
   Linux) os=unknown-linux-musl ;;
-  *) echo "tincan: unsupported OS $(uname -s); build with cargo install --git https://github.com/$repo" >&2; exit 1 ;;
+  *) echo "tincan: unsupported OS $(uname -s); build from source: cargo install --git https://github.com/$repo" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
   arm64|aarch64) arch=aarch64 ;;
@@ -34,8 +34,43 @@ else
 fi
 tar -xzf "$tmp/$asset" -C "$tmp"
 mkdir -p "$dir"
+dir="$(cd "$dir" && pwd)"
 install -m 755 "$tmp/tincan" "$dir/tincan"
 echo "Installed $("$dir/tincan" --version) to $dir/tincan"
-# The skill ships in the binary: put it where Claude Code, Codex and Grok look for skills.
-"$dir/tincan" install-skills >/dev/null && echo "Installed the tincan skill for Claude Code, Codex and Grok"
-case ":$PATH:" in *":$dir:"*) ;; *) echo "Add $dir to your PATH." ;; esac
+# The skills ship in the binary: install them for each agent found on this machine.
+"$dir/tincan" install-skills | sed -n 's/.*"summary":"\([^"]*\)".*/\1/p'
+case ":$PATH:" in
+  *":$dir:"*) ;;
+  *)
+    # Put $dir on PATH for new shells, like rustup and bun do. TINCAN_NO_MODIFY_PATH=1 opts out.
+    if [ -n "${TINCAN_NO_MODIFY_PATH:-}" ]; then
+      echo "Add $dir to your PATH."
+      exit 0
+    fi
+    # Quote $dir as a literal so the rc file never evaluates anything in the path.
+    q="$(printf '%s' "$dir" | sed "s/'/'\\\\''/g")"
+    line="export PATH='$q':\"\$PATH\""
+    case "$(basename "${SHELL:-sh}")" in
+      zsh) rc="${ZDOTDIR:-$HOME}/.zshrc" ;;
+      bash)
+        rc="$HOME/.bashrc"
+        if [ "$os" = apple-darwin ]; then
+          # Login shells read only the first of these that exists.
+          rc="$HOME/.bash_profile"
+          for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+            if [ -f "$f" ]; then rc="$f"; break; fi
+          done
+        fi ;;
+      fish)
+        rc="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/tincan.fish"
+        mkdir -p "$(dirname "$rc")"
+        line="fish_add_path '$(printf '%s' "$dir" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")'" ;;
+      *) rc="$HOME/.profile" ;;
+    esac
+    if ! grep -qsF "$line" "$rc"; then
+      printf '\n# tincan\n%s\n' "$line" >> "$rc"
+      printf 'Added %s to PATH in %s\n' "$dir" "$rc"
+    fi
+    printf 'Open a new terminal (or run: %s) to use tincan.\n' "$line"
+    ;;
+esac

@@ -2,7 +2,7 @@ use serde_json::{Map, Value, json};
 
 /// Attached to every no_team error. Teams are created on demand, so this means an unusable path,
 /// or an agent running somewhere other than the machine that holds the team dir.
-const LOCAL_ONLY_HINT: &str = "tincan could not open or create its team dir (normally the git repo root). \
+const LOCAL_ONLY_HINT: &str = "tincan could not open or create its team dir (normally under ~/.local/share/tincan). \
 Check the path is writable, or pass --team-dir. \
 tincan is local-only: if you are a cloud or remote agent, ask the user to run this session locally instead.";
 use std::fmt;
