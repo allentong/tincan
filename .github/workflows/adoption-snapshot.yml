@@ -1,0 +1,74 @@
+name: adoption-snapshot
+
+on:
+  # Monthly: 1st of each month at 09:00 UTC
+  schedule:
+    - cron: "0 9 1 * *"
+  workflow_dispatch:
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Checkout or create metrics branch
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin metrics >/dev/null 2>&1; then
+            git fetch origin metrics
+            git checkout metrics
+          else
+            git checkout --orphan metrics
+            git rm -rf . 2>/dev/null || true
+            mkdir -p metrics
+            : > metrics/adoption.jsonl
+            git add metrics/adoption.jsonl
+            git commit -m "Initialize metrics/adoption.jsonl"
+          fi
+          mkdir -p metrics
+          test -f metrics/adoption.jsonl || : > metrics/adoption.jsonl
+
+      - name: Append adoption snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DATE="$(date -u +%Y-%m-%d)"
+          REPO="${{ github.repository }}"
+
+          META="$(gh api "repos/${REPO}" --jq '{stars: .stargazers_count, forks: .forks_count, open_issues: .open_issues_count}')"
+          RELEASES="$(gh api "repos/${REPO}/releases" --paginate --jq '[.[] | {tag: .tag_name, assets: [.assets[] | {name: .name, download_count: .download_count}]}]')"
+
+          LINE="$(jq -nc \
+            --arg date "$DATE" \
+            --argjson meta "$META" \
+            --argjson releases "$RELEASES" \
+            '{date: $date, stars: $meta.stars, forks: $meta.forks, open_issues: $meta.open_issues, releases: $releases}')"
+
+          echo "$LINE" >> metrics/adoption.jsonl
+          git add metrics/adoption.jsonl
+          git diff --staged --quiet && echo "No changes to commit" && exit 0
+          git commit -m "Adoption snapshot for ${DATE}"
+          git push origin metrics
+
+      - name: Job summary
+        run: |
+          {
+            echo "## adoption-snapshot"
+            echo ""
+            echo "Appended one JSON line to \`metrics/adoption.jsonl\` on the \`metrics\` branch."
+            echo ""
+            echo '```json'
+            tail -n 1 metrics/adoption.jsonl
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
