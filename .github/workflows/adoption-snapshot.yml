@@ -1,8 +1,9 @@
 name: adoption-snapshot
 
 on:
+  # Monthly: 1st of each month at 09:00 UTC
   schedule:
-    - cron: "0 9 * * 1"
+    - cron: "0 9 1 * *"
   workflow_dispatch:
 
 jobs:

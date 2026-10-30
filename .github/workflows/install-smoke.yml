@@ -1,8 +1,9 @@
 name: install-smoke
 
 on:
+  # Monthly: 1st of each month at 08:00 UTC
   schedule:
-    - cron: "0 8 * * 1"
+    - cron: "0 8 1 * *"
   workflow_dispatch:
   pull_request:
     paths:
