@@ -60,16 +60,18 @@ jobs:
           TEAM_DIR="$(mktemp -d)"
           export TINCAN_TEAM_DIR="$TEAM_DIR"
           tincan init
+          tincan register alice --harness claude --pid 0
+          tincan register bob --harness codex --pid 0
 
           send_json="$(tincan --as alice send bob "install-smoke" --no-launch)"
-          echo "$send_json" | jq -e '.id != null and (.error // null) == null'
+          echo "$send_json" | jq -e '.ok == true and .id != null'
           msg_id="$(echo "$send_json" | jq -r .id)"
 
           inbox_json="$(tincan --as bob inbox --require-ack)"
           echo "$inbox_json" | jq -e --arg id "$msg_id" '.messages | length == 1 and .[0].id == $id and .[0].body == "install-smoke"'
 
           reply_json="$(tincan --as bob send alice "pong" --reply-to "$msg_id" --no-launch)"
-          echo "$reply_json" | jq -e '.hop == 1 and (.error // null) == null'
+          echo "$reply_json" | jq -e '.ok == true and .hop == 1'
 
           ack_json="$(tincan --as bob ack "$msg_id")"
           echo "$ack_json" | jq -e '.acked == 1'
@@ -120,9 +122,13 @@ jobs:
           $env:TINCAN_TEAM_DIR = $teamDir
           & $tincan init
           if ($LASTEXITCODE -ne 0) { throw "tincan init failed" }
+          & $tincan register alice --harness claude --pid 0 | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "register alice failed" }
+          & $tincan register bob --harness codex --pid 0 | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "register bob failed" }
 
           $sendJson = & $tincan --as alice send bob 'install-smoke' --no-launch | ConvertFrom-Json
-          if (-not $sendJson.id) { throw "send missing id: $($sendJson | ConvertTo-Json -Compress)" }
+          if (-not $sendJson.ok -or -not $sendJson.id) { throw "send failed: $($sendJson | ConvertTo-Json -Compress)" }
           $msgId = $sendJson.id
 
           $inboxJson = & $tincan --as bob inbox --require-ack | ConvertFrom-Json
@@ -132,7 +138,7 @@ jobs:
           }
 
           $replyJson = & $tincan --as bob send alice 'pong' --reply-to $msgId --no-launch | ConvertFrom-Json
-          if ($replyJson.hop -ne 1) { throw "reply hop expected 1" }
+          if (-not $replyJson.ok -or $replyJson.hop -ne 1) { throw "reply failed: $($replyJson | ConvertTo-Json -Compress)" }
 
           $ackJson = & $tincan --as bob ack $msgId | ConvertFrom-Json
           if ($ackJson.acked -ne 1) { throw "ack expected acked=1" }
