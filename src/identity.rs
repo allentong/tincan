@@ -254,10 +254,25 @@ fn matches_harness(path: &str, name: &str) -> bool {
     let path = path.to_lowercase().replace('\\', "/");
     let mut parts = path.rsplit('/');
     let base = parts.next().unwrap_or("");
-    if base.starts_with(name) {
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+    if harness_base_matches(base, name) {
         return true;
     }
     base.starts_with(|c: char| c.is_ascii_digit()) && parts.any(|dir| dir == name)
+}
+
+fn harness_base_matches(base: &str, name: &str) -> bool {
+    if base == name {
+        return true;
+    }
+    if base.len() <= name.len() || !base.starts_with(name) {
+        return false;
+    }
+    match base.as_bytes().get(name.len()).copied() {
+        Some(b'-') | Some(b'.') => true,
+        Some(b) if b.is_ascii_digit() => true,
+        _ => false,
+    }
 }
 
 #[cfg(unix)]
@@ -555,6 +570,10 @@ mod tests {
             "/Users/a/.local/share/claude/versions/2.1.282",
             "claude"
         ));
+        assert!(matches_harness("/opt/homebrew/bin/grok", "grok"));
+        assert!(matches_harness("/opt/homebrew/bin/grok-cli", "grok"));
+        assert!(matches_harness("/opt/homebrew/bin/opencode", "opencode"));
+        assert!(!matches_harness("/Applications/Grok Bot Helper", "grok"));
         assert!(!matches_harness("/Users/a/claude/bin/python3", "claude"));
         assert!(!matches_harness("/bin/zsh", "claude"));
     }
