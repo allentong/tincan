@@ -6,6 +6,24 @@ use std::cell::OnceCell;
 
 /// Peers bound to no PID (one-shot harnesses) go stale after this long without a call.
 pub const HEARTBEAT_TTL_SECS: f64 = 15.0 * 60.0;
+/// Heartbeat-only peers refresh `last_seen` at most this often during `wait` and hooks.
+pub const HEARTBEAT_REFRESH_SECS: f64 = 60.0;
+
+fn env_secs(name: &str, default: f64) -> f64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&v| v > 0.0)
+        .unwrap_or(default)
+}
+
+pub(crate) fn heartbeat_ttl_secs() -> f64 {
+    env_secs("TINCAN_HEARTBEAT_TTL_SECS", HEARTBEAT_TTL_SECS)
+}
+
+pub(crate) fn heartbeat_refresh_secs() -> f64 {
+    env_secs("TINCAN_HEARTBEAT_REFRESH_SECS", HEARTBEAT_REFRESH_SECS)
+}
 
 /// What this invocation can learn about the harness that launched it.
 #[derive(Debug, Default)]
@@ -312,7 +330,7 @@ impl Peer {
         }
         match self.pid {
             Some(pid) if !pid_alive(pid) => PeerState::Stale,
-            None if now() - self.last_seen > HEARTBEAT_TTL_SECS => PeerState::Stale,
+            None if now() - self.last_seen > heartbeat_ttl_secs() => PeerState::Stale,
             _ => PeerState::Active,
         }
     }
@@ -406,6 +424,13 @@ pub fn touch(conn: &Connection, role: &str) -> Result<()> {
         "UPDATE peers SET last_seen = ?1 WHERE role = ?2",
         params![now(), role],
     )?;
+    Ok(())
+}
+
+pub fn touch_if_stale(conn: &Connection, peer: &Peer) -> Result<()> {
+    if now() - peer.last_seen >= heartbeat_refresh_secs() {
+        touch(conn, &peer.role)?;
+    }
     Ok(())
 }
 

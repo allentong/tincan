@@ -47,6 +47,7 @@ pub fn run(team: Option<&str>, as_role: Option<&str>, event: &str, linger: f64) 
     let Ok(me) = me(&conn, as_role, &caller) else {
         return notice.map(|n| with_context(&event, vec![n]));
     };
+    let _ = crate::identity::touch_if_stale(&conn, &me);
     match event.as_str() {
         // A quick launched session answers and ends: it never waits for replies to its reply.
         "Stop" | "SubagentStop" => {
