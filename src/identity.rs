@@ -6,6 +6,24 @@ use std::cell::OnceCell;
 
 /// Peers bound to no PID (one-shot harnesses) go stale after this long without a call.
 pub const HEARTBEAT_TTL_SECS: f64 = 15.0 * 60.0;
+/// Heartbeat-only peers refresh `last_seen` at most this often during `wait` and hooks.
+pub const HEARTBEAT_REFRESH_SECS: f64 = 60.0;
+
+fn env_secs(name: &str, default: f64) -> f64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&v| v > 0.0)
+        .unwrap_or(default)
+}
+
+pub(crate) fn heartbeat_ttl_secs() -> f64 {
+    env_secs("TINCAN_HEARTBEAT_TTL_SECS", HEARTBEAT_TTL_SECS)
+}
+
+pub(crate) fn heartbeat_refresh_secs() -> f64 {
+    env_secs("TINCAN_HEARTBEAT_REFRESH_SECS", HEARTBEAT_REFRESH_SECS)
+}
 
 /// What this invocation can learn about the harness that launched it.
 #[derive(Debug, Default)]
@@ -236,10 +254,25 @@ fn matches_harness(path: &str, name: &str) -> bool {
     let path = path.to_lowercase().replace('\\', "/");
     let mut parts = path.rsplit('/');
     let base = parts.next().unwrap_or("");
-    if base.starts_with(name) {
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+    if harness_base_matches(base, name) {
         return true;
     }
     base.starts_with(|c: char| c.is_ascii_digit()) && parts.any(|dir| dir == name)
+}
+
+fn harness_base_matches(base: &str, name: &str) -> bool {
+    if base == name {
+        return true;
+    }
+    if base.len() <= name.len() || !base.starts_with(name) {
+        return false;
+    }
+    match base.as_bytes().get(name.len()).copied() {
+        Some(b'-') | Some(b'.') => true,
+        Some(b) if b.is_ascii_digit() => true,
+        _ => false,
+    }
 }
 
 #[cfg(unix)]
@@ -312,7 +345,7 @@ impl Peer {
         }
         match self.pid {
             Some(pid) if !pid_alive(pid) => PeerState::Stale,
-            None if now() - self.last_seen > HEARTBEAT_TTL_SECS => PeerState::Stale,
+            None if now() - self.last_seen > heartbeat_ttl_secs() => PeerState::Stale,
             _ => PeerState::Active,
         }
     }
@@ -406,6 +439,13 @@ pub fn touch(conn: &Connection, role: &str) -> Result<()> {
         "UPDATE peers SET last_seen = ?1 WHERE role = ?2",
         params![now(), role],
     )?;
+    Ok(())
+}
+
+pub fn touch_if_stale(conn: &Connection, peer: &Peer) -> Result<()> {
+    if now() - peer.last_seen >= heartbeat_refresh_secs() {
+        touch(conn, &peer.role)?;
+    }
     Ok(())
 }
 
@@ -530,6 +570,10 @@ mod tests {
             "/Users/a/.local/share/claude/versions/2.1.282",
             "claude"
         ));
+        assert!(matches_harness("/opt/homebrew/bin/grok", "grok"));
+        assert!(matches_harness("/opt/homebrew/bin/grok-cli", "grok"));
+        assert!(matches_harness("/opt/homebrew/bin/opencode", "opencode"));
+        assert!(!matches_harness("/Applications/Grok Bot Helper", "grok"));
         assert!(!matches_harness("/Users/a/claude/bin/python3", "claude"));
         assert!(!matches_harness("/bin/zsh", "claude"));
     }

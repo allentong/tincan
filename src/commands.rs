@@ -1104,6 +1104,7 @@ fn wait(
 ) -> Result<Option<Value>> {
     let me = me(conn, as_role, caller)?;
     let deadline = now() + timeout;
+    let mut last_refresh = me.last_seen;
     // A session started with --stay serves the session that started it, and ends with it.
     let lead = std::env::var("TINCAN_LEAD").ok().filter(|l| !l.is_empty());
     loop {
@@ -1121,6 +1122,11 @@ fn wait(
             return Ok(Some(
                 json!({"ok": true, "role": me.role, "unread": n, "timed_out": n == 0}),
             ));
+        }
+        let t = now();
+        if t - last_refresh >= identity::heartbeat_refresh_secs() {
+            touch(conn, &me.role)?;
+            last_refresh = t;
         }
         std::thread::sleep(WAIT_POLL_INTERVAL);
     }
@@ -1282,4 +1288,78 @@ fn install_skills() -> Result<Option<Value>> {
     Ok(Some(
         json!({"ok": true, "installed": installed, "skipped": skipped}),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait;
+    use crate::identity::{LazyCaller, PeerState};
+    use crate::store::{connect, now};
+    use rusqlite::params;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn with_env(vars: &[(&str, &str)], f: impl FnOnce()) {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let prev: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var(k).ok()))
+            .collect();
+        for (k, v) in vars {
+            // SAFETY: serialized by ENV_LOCK; each test restores prior values.
+            unsafe { std::env::set_var(k, v) };
+        }
+        f();
+        for (k, v) in prev {
+            match v {
+                // SAFETY: serialized by ENV_LOCK; each test restores prior values.
+                Some(val) => unsafe { std::env::set_var(k, val) },
+                None => unsafe { std::env::remove_var(k) },
+            }
+        }
+    }
+
+    fn temp_db() -> PathBuf {
+        let db = std::env::temp_dir().join(format!(
+            "tincan-wait-test-{}-{}.db",
+            std::process::id(),
+            now()
+        ));
+        let _ = std::fs::remove_file(&db);
+        db
+    }
+
+    #[test]
+    fn wait_refreshes_heartbeat_only_peer() {
+        with_env(
+            &[
+                ("TINCAN_HEARTBEAT_TTL_SECS", "0.4"),
+                ("TINCAN_HEARTBEAT_REFRESH_SECS", "0.1"),
+            ],
+            || {
+                let db = temp_db();
+                let conn = connect(&db).unwrap();
+                let stale = now() - 10.0;
+                conn.execute(
+                    "INSERT INTO peers(role, harness, session_key, pid, registered_at, last_seen, status, wake, workspace)
+                     VALUES (?1, ?2, NULL, NULL, ?3, ?3, 'active', NULL, ?4)",
+                    params!["bot", "claude", stale, "/tmp"],
+                )
+                .unwrap();
+                let caller = LazyCaller::default();
+                wait(&conn, Some("bot"), &caller, 0.35).unwrap();
+                let peer = crate::identity::get_peer(&conn, "bot").unwrap().unwrap();
+                assert!(
+                    peer.last_seen > stale + 0.05,
+                    "last_seen={} stale={}",
+                    peer.last_seen,
+                    stale
+                );
+                assert_eq!(peer.state(), PeerState::Active);
+                let _ = std::fs::remove_file(db);
+            },
+        );
+    }
 }

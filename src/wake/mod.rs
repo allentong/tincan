@@ -243,7 +243,7 @@ fn run_with_timeout(cmd: &mut Command, timeout: std::time::Duration) -> io::Resu
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
@@ -269,10 +269,33 @@ fn run_with_timeout(cmd: &mut Command, timeout: std::time::Duration) -> io::Resu
     if let Some(mut stdout) = child.stdout.take() {
         std::io::Read::read_to_end(&mut stdout, &mut bytes)?;
     }
+    let mut stderr_bytes = vec![];
+    if let Some(mut stderr) = child.stderr.take() {
+        std::io::Read::read_to_end(&mut stderr, &mut stderr_bytes)?;
+    }
     if !status.success() {
-        return Err(io::Error::other(format!("wake helper exited {status}")));
+        let mut msg = format!("wake helper exited {status}");
+        if let Some(line) = stderr_first_line(&stderr_bytes) {
+            msg.push_str(": ");
+            msg.push_str(&line);
+        }
+        return Err(io::Error::other(msg));
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn stderr_first_line(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let line = text.lines().find(|l| !l.trim().is_empty())?.trim();
+    if line.is_empty() {
+        return None;
+    }
+    const MAX: usize = 200;
+    Some(if line.len() <= MAX {
+        line.to_string()
+    } else {
+        format!("{}…", &line[..line.floor_char_boundary(MAX)])
+    })
 }
 
 #[cfg(test)]
@@ -308,6 +331,26 @@ mod tests {
         );
         assert!(parse(&json!({"name": "z", "nudge": [["x", "{text}"]]}), false).is_ok());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_stderr_surfaces_in_error() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "echo 'Access denied - only processes started inside cmux can connect' >&2; exit 1",
+        ]);
+        let error = run_with_timeout(&mut command, std::time::Duration::from_secs(3))
+            .expect_err("helper should fail");
+        let msg = error.to_string();
+        assert!(msg.contains("exit status: 1"), "{msg}");
+        assert!(
+            msg.contains("Access denied - only processes started inside cmux can connect"),
+            "{msg}"
+        );
+    }
+
+    // Windows: wake helpers are not unit-tested here.
 
     #[cfg(unix)]
     #[test]
